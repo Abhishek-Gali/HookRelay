@@ -13,7 +13,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.config import settings
 from app.security import verify_signature
-from app.store import store, DeliveryStore, IllegalStateTransitionError
+from app.store import store, IllegalStateTransitionError
 from app.models import DeliveryDTO, AuditLogDTO
 from app.auth import (
     get_current_user_role,

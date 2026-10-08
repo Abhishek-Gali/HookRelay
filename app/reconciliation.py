@@ -8,7 +8,6 @@ import httpx
 
 from app.config import settings
 from app.dispatcher import ResilientDispatcher
-from app.formatter import format_payload
 from app.routing import parse_persisted_destinations
 from app.sender import DiscordSender
 from app.store import DeliveryStore

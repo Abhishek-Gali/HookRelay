@@ -1,6 +1,6 @@
 import pytest
 import httpx
-from app.providers import DiscordProvider, SlackProvider, GenericHttpProvider
+from app.providers import SlackProvider, GenericHttpProvider
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-name: HookRelay CI & DevSecOps Pipeline
+name: "HookRelay CI & DevSecOps Pipeline"
 
 on:
   push:
@@ -53,9 +53,10 @@ jobs:
 
     - name: Run Automated Pytest Suite with Coverage
       env:
-        GITHUB_WEBHOOK_SECRET: ci_test_secret_key_at_least_16_chars
-        DISCORD_WEBHOOK_URL: https://discord.com/api/webhooks/000000000000000000/mock
-        DATABASE_URL: sqlite+aiosqlite:///:memory:
-        ENVIRONMENT: test
+        GITHUB_WEBHOOK_SECRET: "ci_test_secret_key_at_least_16_chars"
+        DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/000000000000000000/mock"
+        DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+        ENVIRONMENT: "test"
       run: |
         python -m pytest tests/ -v --cov=app --cov-report=term-missing
+

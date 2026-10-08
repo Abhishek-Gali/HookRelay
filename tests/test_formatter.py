@@ -1,11 +1,7 @@
-import pytest
 from app.formatter import (
     sanitize_mentions,
     truncate,
-    format_payload,
-    format_push_content,
-    format_issues_content,
-    format_pull_request_content
+    format_payload
 )
 
 

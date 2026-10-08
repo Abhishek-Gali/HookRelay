@@ -1,4 +1,3 @@
-import pytest
 from app.security import calculate_signature, verify_signature
 
 
