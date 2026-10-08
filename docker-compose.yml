@@ -1,12 +1,18 @@
+# Local Development & Integration Testing Stack
+# For production deployments, always supply secrets via .env or secret manager.
 services:
   hookrelay:
     build: .
     ports:
       - "8000:8000"
     environment:
-      - GITHUB_WEBHOOK_SECRET=super_secret_github_key_123
-      - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/mock/test
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/hookrelay
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-dev_only_webhook_secret_replace_me}
+      - ADMIN_API_KEY=${ADMIN_API_KEY:-}
+      - OPERATOR_API_KEY=${OPERATOR_API_KEY:-}
+      - VIEWER_API_KEY=${VIEWER_API_KEY:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-https://discord.com/api/webhooks/000000000000000000/dev_placeholder}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev_only_postgres_password}@db:5432/${POSTGRES_DB:-hookrelay}
       - ENABLE_EMBEDS=true
       - ENABLE_RECONCILIATION=true
     depends_on:
@@ -16,15 +22,15 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: hookrelay
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_only_postgres_password}
+      POSTGRES_DB: ${POSTGRES_DB:-hookrelay}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d hookrelay"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-hookrelay}"]
       interval: 5s
       timeout: 5s
       retries: 5

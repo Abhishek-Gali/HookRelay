@@ -1,14 +1,15 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 import asyncio
+import json
 import logging
+import uuid
+
+from app.config import settings
+from app.routing import parse_persisted_destinations
+from app.store import DeliveryStore, store as default_store
 
 logger = logging.getLogger("hookrelay.queue")
-
-
-class QueueJob(Dict[str, Any]):
-    """Represents a discrete queued delivery task."""
-    pass
 
 
 class BaseQueueBroker(ABC):
@@ -27,45 +28,96 @@ class BaseQueueBroker(ABC):
         pass
 
     @abstractmethod
-    async def dequeue(self) -> Optional[Dict[str, Any]]:
+    async def dequeue(self, worker_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         pass
 
     @abstractmethod
-    def size(self) -> int:
+    async def get_depth(self) -> int:
         pass
 
 
-class MemoryQueueBroker(BaseQueueBroker):
+class DatabaseQueueBroker(BaseQueueBroker):
     """
-    In-memory async queue with graceful lifecycle.
-    Guarantees zero-dependency local operation and testability.
+    Production-grade SQL-backed durable job queue with atomic worker leases.
+    - Jobs are persisted in the 'deliveries' table before acknowledgment.
+    - Survives process restarts and crashes without losing queued work.
+    - Uses an in-process asyncio.Event wakeup signal for sub-millisecond latency
+      combined with SQL polling and atomic lease acquisition (worker_id + locked_until).
     """
-    def __init__(self, maxsize: int = 10000):
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
+    def __init__(self, delivery_store: Optional[DeliveryStore] = None, lease_seconds: Optional[int] = None):
+        self.store = delivery_store or default_store
+        self.lease_seconds = lease_seconds or settings.worker_lease_seconds
+        self._wakeup = asyncio.Event()
         self._running = False
+        self.default_worker_id = f"worker-{uuid.uuid4().hex[:8]}"
 
     async def start(self) -> None:
         self._running = True
+        self._wakeup.set()
 
     async def stop(self) -> None:
         self._running = False
+        self._wakeup.set()
 
     async def enqueue(self, job: Dict[str, Any]) -> None:
-        await self._queue.put(job)
+        """
+        Ensures the delivery row is persisted in SQL (if not already claimed by the route)
+        and wakes up any waiting worker immediately.
+        """
+        delivery_id = job["delivery_id"]
+        existing = await self.store.get_delivery(delivery_id, include_attempts=False)
+        if existing is None:
+            await self.store.claim_delivery(
+                delivery_id=delivery_id,
+                event_type=job.get("event_type", "unknown"),
+                repo=job.get("payload", {}).get("repository", {}).get("full_name"),
+                payload=job.get("payload", {}),
+                destinations=job.get("destinations")
+            )
+        self._wakeup.set()
 
-    async def dequeue(self) -> Optional[Dict[str, Any]]:
+    async def dequeue(self, worker_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Atomically claims and leases the next runnable job from the SQL store.
+        Two workers calling dequeue() concurrently can NEVER receive the same job.
+        """
+        wid = worker_id or self.default_worker_id
+        leased = await self.store.claim_next_runnable_job(
+            worker_id=wid,
+            lease_seconds=self.lease_seconds
+        )
+        if leased is not None:
+            payload = json.loads(leased.payload) if leased.payload else {}
+            destinations = parse_persisted_destinations(
+                leased.destinations,
+                default_url=settings.discord_webhook_url
+            )
+            return {
+                "delivery_id": leased.delivery_id,
+                "event_type": leased.event_type,
+                "payload": payload,
+                "destinations": [d.model_dump() for d in destinations],
+                "worker_id": wid,
+            }
+
+        # Wait briefly for a new enqueue wakeup or poll interval
         try:
-            return await asyncio.wait_for(self._queue.get(), timeout=1.0)
+            self._wakeup.clear()
+            await asyncio.wait_for(
+                self._wakeup.wait(),
+                timeout=settings.worker_poll_interval_seconds
+            )
         except asyncio.TimeoutError:
-            return None
+            pass
+        return None
 
-    def size(self) -> int:
-        return self._queue.qsize()
+    async def get_depth(self) -> int:
+        return await self.store.count_pending_jobs()
 
 
-def get_queue_broker(redis_url: Optional[str] = None) -> BaseQueueBroker:
-    """
-    Factory returning either RedisQueueBroker (if REDIS_URL configured)
-    or MemoryQueueBroker.
-    """
-    return MemoryQueueBroker()
+def get_queue_broker(
+    delivery_store: Optional[DeliveryStore] = None,
+    lease_seconds: Optional[int] = None
+) -> BaseQueueBroker:
+    """Returns a SQL-backed durable queue broker."""
+    return DatabaseQueueBroker(delivery_store=delivery_store, lease_seconds=lease_seconds)

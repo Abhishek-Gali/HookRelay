@@ -3,8 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HookRelay • Live Operations Console</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <title>HookRelay • Operations Console</title>
     <style>
         :root {
             --bg-primary: #0d1117;
@@ -23,24 +22,20 @@
         body { background-color: var(--bg-primary); color: var(--text-primary); line-height: 1.5; padding: 24px; }
         .container { max-width: 1200px; margin: 0 auto; }
 
-        /* Header */
         header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 18px; margin-bottom: 24px; }
         .logo { display: flex; align-items: center; gap: 12px; font-size: 22px; font-weight: 700; color: #fff; }
-        .logo i { color: var(--accent-blue); font-size: 26px; }
         .auth-bar { display: flex; gap: 10px; align-items: center; }
-        input[type="password"] { background: var(--bg-secondary); border: 1px solid var(--border-color); color: #fff; padding: 8px 14px; border-radius: 6px; font-size: 13px; }
+        input[type="password"] { background: var(--bg-secondary); border: 1px solid var(--border-color); color: #fff; padding: 8px 14px; border-radius: 6px; font-size: 13px; min-width: 260px; }
         button { background: var(--accent-green); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; transition: opacity 0.2s; }
         button:hover { opacity: 0.9; }
         button.secondary { background: var(--bg-secondary); border: 1px solid var(--border-color); }
 
-        /* Stats Grid */
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 28px; }
         .stat-card { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 18px; }
         .stat-title { font-size: 13px; color: var(--text-secondary); text-transform: uppercase; font-weight: 600; margin-bottom: 6px; }
         .stat-value { font-size: 28px; font-weight: 700; color: #fff; }
         .stat-badge { font-size: 12px; margin-top: 4px; display: inline-block; padding: 2px 8px; border-radius: 12px; }
 
-        /* Table Card */
         .card { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; margin-bottom: 24px; }
         .card-header { padding: 16px 20px; border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; }
         .card-title { font-size: 16px; font-weight: 600; color: #fff; display: flex; align-items: center; gap: 8px; }
@@ -49,18 +44,15 @@
         td { padding: 12px 18px; border-bottom: 1px solid var(--border-color); }
         tr:hover { background: rgba(255, 255, 255, 0.02); }
 
-        /* Status Badges */
         .badge { padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
         .badge-sent { background: rgba(35, 134, 54, 0.2); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.3); }
-        .badge-received { background: rgba(88, 166, 255, 0.2); color: #58a6ff; border: 1px solid rgba(88, 166, 255, 0.3); }
+        .badge-received, .badge-queued, .badge-processing { background: rgba(88, 166, 255, 0.2); color: #58a6ff; border: 1px solid rgba(88, 166, 255, 0.3); }
         .badge-dead_letter { background: rgba(218, 54, 51, 0.2); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.3); }
-        .badge-failed { background: rgba(210, 153, 34, 0.2); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.3); }
+        .badge-retry_wait, .badge-failed { background: rgba(210, 153, 34, 0.2); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.3); }
 
-        /* Action Buttons */
-        .btn-sm { padding: 4px 10px; font-size: 11px; border-radius: 4px; }
+        .btn-sm { padding: 4px 10px; font-size: 11px; border-radius: 4px; margin-right: 6px; }
         .btn-replay { background: var(--accent-purple); color: #fff; }
 
-        /* Modal */
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); justify-content: center; align-items: center; z-index: 1000; }
         .modal-content { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; width: 650px; max-height: 80vh; overflow-y: auto; padding: 24px; }
         .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 16px; }
@@ -72,16 +64,14 @@
     <div class="container">
         <header>
             <div class="logo">
-                <i class="fa-solid fa-satellite-dish"></i>
-                <span>HookRelay <small style="font-size: 12px; color: var(--accent-blue); font-weight: normal;">v2.0 Enterprise</small></span>
+                <span>📡 HookRelay <small style="font-size: 12px; color: var(--accent-blue); font-weight: normal;">Operations Console</small></span>
             </div>
             <div class="auth-bar">
-                <input type="password" id="apiKey" placeholder="Admin or Viewer API Key" value="hr_admin_secret_key_12345">
-                <button onclick="refreshData()"><i class="fa-solid fa-arrows-rotate"></i> Refresh</button>
+                <input type="password" id="apiKey" placeholder="Enter X-API-Key (Admin / Operator / Viewer)" autocomplete="off">
+                <button id="refreshBtn" type="button">↻ Refresh</button>
             </div>
         </header>
 
-        <!-- Stats Grid -->
         <div class="stats-grid">
             <div class="stat-card">
                 <div class="stat-title">Total Ingested</div>
@@ -105,14 +95,13 @@
             </div>
         </div>
 
-        <!-- Deliveries Table -->
         <div class="card">
             <div class="card-header">
-                <div class="card-title"><i class="fa-solid fa-list-check"></i> Recent Deliveries & Ingestion Feed</div>
+                <div class="card-title">📋 Recent Deliveries &amp; Ingestion Feed</div>
                 <div>
-                    <button class="secondary btn-sm" onclick="filterStatus('')">All</button>
-                    <button class="secondary btn-sm" onclick="filterStatus('dead_letter')">DLQ Only</button>
-                    <button class="secondary btn-sm" onclick="filterStatus('sent')">Sent Only</button>
+                    <button class="secondary btn-sm" type="button" data-filter="">All</button>
+                    <button class="secondary btn-sm" type="button" data-filter="dead_letter">DLQ Only</button>
+                    <button class="secondary btn-sm" type="button" data-filter="sent">Sent Only</button>
                 </div>
             </div>
             <table>
@@ -128,18 +117,17 @@
                     </tr>
                 </thead>
                 <tbody id="deliveriesBody">
-                    <tr><td colspan="7" style="text-align: center; color: var(--text-secondary); padding: 30px;">Loading deliveries...</td></tr>
+                    <tr><td colspan="7" style="text-align: center; color: var(--text-secondary); padding: 30px;">Enter a valid X-API-Key above and click Refresh.</td></tr>
                 </tbody>
             </table>
         </div>
     </div>
 
-    <!-- Attempt History Modal -->
     <div class="modal" id="attemptModal">
         <div class="modal-content">
             <div class="modal-header">
                 <h3 id="modalTitle" style="color: #fff; font-size: 16px;">Delivery Attempt History</h3>
-                <span class="close-btn" onclick="closeModal()">&times;</span>
+                <span class="close-btn" id="closeModalBtn">&times;</span>
             </div>
             <div id="modalBody"></div>
         </div>
@@ -149,84 +137,177 @@
         let currentFilter = '';
 
         function getHeaders() {
-            const key = document.getElementById('apiKey').value;
-            return { 'X-API-Key': key };
+            const key = document.getElementById('apiKey').value.trim();
+            return key ? { 'X-API-Key': key } : {};
+        }
+
+        function setEmptyRow(tbody, message) {
+            tbody.replaceChildren();
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 7;
+            td.style.textAlign = 'center';
+            td.style.padding = '24px';
+            td.style.color = 'var(--text-secondary)';
+            td.textContent = message;
+            tr.appendChild(td);
+            tbody.appendChild(tr);
         }
 
         async function refreshData() {
+            const tbody = document.getElementById('deliveriesBody');
+            const headers = getHeaders();
+            if (!headers['X-API-Key']) {
+                setEmptyRow(tbody, 'Enter a valid X-API-Key above and click Refresh.');
+                return;
+            }
             try {
-                // Fetch stats
-                const statsRes = await fetch('/api/stats', { headers: getHeaders() });
+                const statsRes = await fetch('/api/stats', { headers });
                 if (statsRes.ok) {
                     const stats = await statsRes.json();
-                    document.getElementById('statTotal').innerText = stats.total_deliveries;
-                    document.getElementById('statSent').innerText = stats.sent_deliveries;
-                    document.getElementById('statDlq').innerText = stats.dlq_deliveries;
-                    document.getElementById('statRate').innerText = stats.success_rate + '%';
+                    document.getElementById('statTotal').textContent = String(stats.total_deliveries);
+                    document.getElementById('statSent').textContent = String(stats.sent_deliveries);
+                    document.getElementById('statDlq').textContent = String(stats.dlq_deliveries);
+                    document.getElementById('statRate').textContent = String(stats.success_rate) + '%';
                 }
 
-                // Fetch deliveries
                 let url = '/api/deliveries?limit=30';
-                if (currentFilter) url += '&status=' + currentFilter;
-                const delRes = await fetch(url, { headers: getHeaders() });
+                if (currentFilter) url += '&status=' + encodeURIComponent(currentFilter);
+                const delRes = await fetch(url, { headers });
                 if (delRes.ok) {
                     const deliveries = await delRes.json();
-                    renderTable(deliveries);
+                    renderTableSafe(deliveries);
+                } else if (delRes.status === 401 || delRes.status === 403) {
+                    setEmptyRow(tbody, 'Authentication failed: Invalid or insufficient X-API-Key.');
                 }
             } catch (err) {
                 console.error(err);
             }
         }
 
-        function renderTable(items) {
+        function renderTableSafe(items) {
             const tbody = document.getElementById('deliveriesBody');
-            if (!items.length) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 24px; color: var(--text-secondary);">No deliveries found.</td></tr>';
+            tbody.replaceChildren();
+            if (!items || !items.length) {
+                setEmptyRow(tbody, 'No deliveries found.');
                 return;
             }
 
-            tbody.innerHTML = items.map(d => `
-                <tr>
-                    <td><code>${d.delivery_id.slice(0, 16)}...</code></td>
-                    <td><strong>${d.event_type}</strong></td>
-                    <td>${d.repo || '<em>N/A</em>'}</td>
-                    <td><span class="badge badge-${d.status}">${d.status}</span></td>
-                    <td>${d.attempts}</td>
-                    <td>${new Date(d.updated_at).toLocaleTimeString()}</td>
-                    <td>
-                        <button class="secondary btn-sm" onclick="viewAttempts('${d.delivery_id}')"><i class="fa-solid fa-eye"></i> Details</button>
-                        ${d.status === 'dead_letter' || d.status === 'failed' ? `<button class="btn-replay btn-sm" onclick="replayDelivery('${d.delivery_id}')"><i class="fa-solid fa-rotate-right"></i> Replay</button>` : ''}
-                    </td>
-                </tr>
-            `).join('');
+            items.forEach(d => {
+                const tr = document.createElement('tr');
+
+                // Delivery ID cell
+                const tdId = document.createElement('td');
+                const codeId = document.createElement('code');
+                const rawId = String(d.delivery_id || '');
+                codeId.textContent = rawId.length > 16 ? rawId.slice(0, 16) + '...' : rawId;
+                tdId.appendChild(codeId);
+                tr.appendChild(tdId);
+
+                // Event cell
+                const tdEvent = document.createElement('td');
+                const strongEvent = document.createElement('strong');
+                strongEvent.textContent = String(d.event_type || '');
+                tdEvent.appendChild(strongEvent);
+                tr.appendChild(tdEvent);
+
+                // Repo cell (strict textContent prevents stored XSS)
+                const tdRepo = document.createElement('td');
+                tdRepo.textContent = d.repo ? String(d.repo) : 'N/A';
+                tr.appendChild(tdRepo);
+
+                // Status badge cell
+                const tdStatus = document.createElement('td');
+                const spanBadge = document.createElement('span');
+                const safeStatus = String(d.status || 'received').replace(/[^a-z0-9_]/gi, '');
+                spanBadge.className = 'badge badge-' + safeStatus;
+                spanBadge.textContent = String(d.status || '');
+                tdStatus.appendChild(spanBadge);
+                tr.appendChild(tdStatus);
+
+                // Attempts cell
+                const tdAttempts = document.createElement('td');
+                tdAttempts.textContent = String(d.attempts ?? 0);
+                tr.appendChild(tdAttempts);
+
+                // Updated at cell
+                const tdUpdated = document.createElement('td');
+                tdUpdated.textContent = d.updated_at ? new Date(d.updated_at).toLocaleTimeString() : '-';
+                tr.appendChild(tdUpdated);
+
+                // Actions cell
+                const tdActions = document.createElement('td');
+                const btnDetails = document.createElement('button');
+                btnDetails.type = 'button';
+                btnDetails.className = 'secondary btn-sm';
+                btnDetails.textContent = 'Details';
+                btnDetails.addEventListener('click', () => viewAttempts(rawId));
+                tdActions.appendChild(btnDetails);
+
+                if (d.status === 'dead_letter' || d.status === 'failed') {
+                    const btnReplay = document.createElement('button');
+                    btnReplay.type = 'button';
+                    btnReplay.className = 'btn-replay btn-sm';
+                    btnReplay.textContent = 'Replay';
+                    btnReplay.addEventListener('click', () => replayDelivery(rawId));
+                    tdActions.appendChild(btnReplay);
+                }
+
+                tr.appendChild(tdActions);
+                tbody.appendChild(tr);
+            });
         }
 
         async function viewAttempts(deliveryId) {
-            const res = await fetch(`/api/deliveries/${deliveryId}`, { headers: getHeaders() });
-            if (res.ok) {
-                const data = await res.json();
-                document.getElementById('modalTitle').innerText = `Attempts: ${deliveryId}`;
-                const body = document.getElementById('modalBody');
-                if (!data.attempt_history || !data.attempt_history.length) {
-                    body.innerHTML = '<p style="color: var(--text-secondary);">No attempts logged yet.</p>';
-                } else {
-                    body.innerHTML = data.attempt_history.map(a => `
-                        <div class="attempt-item">
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                                <strong>Attempt #${a.attempt_number} • ${a.destination.toUpperCase()}</strong>
-                                <span style="color: ${a.http_status === 200 || a.http_status === 204 ? '#3fb950' : '#f85149'};">HTTP ${a.http_status || 'ERR'} (${a.response_time_ms}ms)</span>
-                            </div>
-                            <div style="color: var(--text-secondary);">${a.error_message || 'Success'}</div>
-                        </div>
-                    `).join('');
-                }
-                document.getElementById('attemptModal').style.display = 'flex';
+            const res = await fetch('/api/deliveries/' + encodeURIComponent(deliveryId), { headers: getHeaders() });
+            if (!res.ok) return;
+            const data = await res.json();
+            document.getElementById('modalTitle').textContent = 'Attempts: ' + String(deliveryId);
+            const body = document.getElementById('modalBody');
+            body.replaceChildren();
+
+            if (!data.attempt_history || !data.attempt_history.length) {
+                const p = document.createElement('p');
+                p.style.color = 'var(--text-secondary)';
+                p.textContent = 'No attempts logged yet.';
+                body.appendChild(p);
+            } else {
+                data.attempt_history.forEach(a => {
+                    const item = document.createElement('div');
+                    item.className = 'attempt-item';
+
+                    const topRow = document.createElement('div');
+                    topRow.style.display = 'flex';
+                    topRow.style.justifyContent = 'space-between';
+                    topRow.style.marginBottom = '4px';
+
+                    const strongLabel = document.createElement('strong');
+                    strongLabel.textContent = 'Attempt #' + String(a.attempt_number) + ' • ' + String(a.destination || '').toUpperCase();
+
+                    const spanCode = document.createElement('span');
+                    const isOk = a.http_status === 200 || a.http_status === 204;
+                    spanCode.style.color = isOk ? '#3fb950' : '#f85149';
+                    spanCode.textContent = 'HTTP ' + String(a.http_status || 'ERR') + ' (' + String(a.response_time_ms ?? 0) + 'ms)';
+
+                    topRow.appendChild(strongLabel);
+                    topRow.appendChild(spanCode);
+
+                    const errRow = document.createElement('div');
+                    errRow.style.color = 'var(--text-secondary)';
+                    // textContent ensures downstream error payloads cannot execute XSS
+                    errRow.textContent = a.error_message ? String(a.error_message) : 'Success';
+
+                    item.appendChild(topRow);
+                    item.appendChild(errRow);
+                    body.appendChild(item);
+                });
             }
+            document.getElementById('attemptModal').style.display = 'flex';
         }
 
         async function replayDelivery(deliveryId) {
-            if (!confirm(`Replay delivery ${deliveryId}?`)) return;
-            const res = await fetch(`/api/deliveries/${deliveryId}/redrive`, {
+            if (!confirm('Replay delivery ' + deliveryId + '?')) return;
+            const res = await fetch('/api/deliveries/' + encodeURIComponent(deliveryId) + '/redrive', {
                 method: 'POST',
                 headers: getHeaders()
             });
@@ -238,23 +319,24 @@
             }
         }
 
-        function filterStatus(status) {
-            currentFilter = status;
-            refreshData();
-        }
-
         function closeModal() {
             document.getElementById('attemptModal').style.display = 'none';
         }
 
-        window.onclick = function(event) {
-            if (event.target == document.getElementById('attemptModal')) {
+        document.getElementById('refreshBtn').addEventListener('click', refreshData);
+        document.getElementById('closeModalBtn').addEventListener('click', closeModal);
+        document.querySelectorAll('[data-filter]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                currentFilter = btn.getAttribute('data-filter') || '';
+                refreshData();
+            });
+        });
+
+        window.addEventListener('click', function(event) {
+            if (event.target === document.getElementById('attemptModal')) {
                 closeModal();
             }
-        }
-
-        refreshData();
-        setInterval(refreshData, 10000);
+        });
     </script>
 </body>
 </html>

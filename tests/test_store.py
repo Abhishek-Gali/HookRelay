@@ -1,6 +1,6 @@
 import asyncio
 import pytest
-from app.store import DeliveryStore
+from app.store import DeliveryStore, IllegalStateTransitionError
 
 
 @pytest.mark.asyncio
@@ -32,7 +32,6 @@ async def test_concurrent_claim_race_condition():
         return await store.claim_delivery("del-race-999", "pull_request", "owner/repo")
 
     results = await asyncio.gather(*[try_claim(i) for i in range(20)])
-    # Exactly one True and 19 False
     assert results.count(True) == 1
     assert results.count(False) == 19
 
@@ -40,7 +39,7 @@ async def test_concurrent_claim_race_condition():
 
 
 @pytest.mark.asyncio
-async def test_status_lifecycle_transitions():
+async def test_status_lifecycle_transitions_and_state_machine():
     store = DeliveryStore("sqlite+aiosqlite:///:memory:")
     await store.init_db()
 
@@ -49,17 +48,31 @@ async def test_status_lifecycle_transitions():
     assert row.status == "received"
     assert row.attempts == 0
 
-    # Mark sent
+    # Transition received -> processing -> sent
+    leased = await store.acquire_lease("del-202", worker_id="w1")
+    assert leased is not None
+    assert leased.status == "processing"
+
     await store.mark_sent("del-202", attempts=1)
     row = await store.get_delivery("del-202")
     assert row.status == "sent"
     assert row.attempts == 1
 
-    # Mark failed / dead_letter
-    await store.mark_failed("del-202", attempts=5, error="Discord 500 error")
-    row = await store.get_delivery("del-202")
-    assert row.status == "dead_letter"
-    assert row.attempts == 5
-    assert "Discord 500 error" in row.last_error
+    # Illegal transition: sent -> dead_letter must raise IllegalStateTransitionError
+    with pytest.raises(IllegalStateTransitionError):
+        await store.mark_failed("del-202", attempts=5, error="Cannot fail after sent")
+
+    # Separate delivery transitioning received -> dead_letter -> discarded
+    await store.claim_delivery("del-203", "issues", "owner/repo")
+    await store.mark_failed("del-203", attempts=5, error="Discord 500 error")
+    row_failed = await store.get_delivery("del-203")
+    assert row_failed.status == "dead_letter"
+    assert row_failed.attempts == 5
+    assert "Discord 500 error" in row_failed.last_error
+
+    discarded = await store.discard_dlq("del-203")
+    assert discarded is True
+    with pytest.raises(IllegalStateTransitionError):
+        await store.mark_sent("del-203", attempts=6)
 
     await store.close()

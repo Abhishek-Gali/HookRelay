@@ -1,7 +1,7 @@
-import asyncio
 import pytest
 import httpx
-from app.sender import DiscordSender, RetryableError, NonRetryableError
+from app.providers import extract_retry_after, read_bounded_error
+from app.sender import DiscordSender, RetryPolicy, RetryableError, NonRetryableError
 
 
 @pytest.mark.asyncio
@@ -37,6 +37,8 @@ async def test_discord_retry_on_500_then_success():
     transport = httpx.MockTransport(mock_handler)
     async with httpx.AsyncClient(transport=transport) as client:
         sender = DiscordSender(client=client, max_retries=4)
+        sender.policy.initial_backoff = 0.01
+        sender.policy.jitter = 0.0
         attempts = await sender.send_to_discord("https://discord.mock/webhook", {"content": "retry test"})
 
     assert attempts == 3
@@ -64,6 +66,36 @@ async def test_discord_rate_limit_429_handled():
     assert call_count == 2
 
 
+def test_retry_after_30_seconds_respected():
+    """
+    Proves RetryPolicy honors server Retry-After of 30 seconds instead of capping at 5 seconds,
+    while enforcing the configurable safety ceiling (default 60s).
+    """
+    policy = RetryPolicy(max_attempts=5, max_retry_after_seconds=60.0)
+    assert policy.compute_sleep_seconds(attempt_num=1, retry_after=30.0) == 30.0
+    assert policy.compute_sleep_seconds(attempt_num=1, retry_after=120.0) == 60.0
+
+
+def test_retry_after_malformed_value_handled_safely():
+    """Proves malformed Retry-After headers do not crash parsing and fall back to backoff."""
+    resp = httpx.Response(429, headers={"Retry-After": "not-a-number"}, text="rate limited")
+    parsed = extract_retry_after(resp)
+    assert parsed is None
+
+    policy = RetryPolicy(max_attempts=3, initial_backoff=1.0, jitter=0.0)
+    sleep_s = policy.compute_sleep_seconds(attempt_num=2, retry_after=parsed)
+    assert sleep_s == 2.0
+
+
+def test_downstream_error_body_bounded():
+    """Proves oversized downstream error payloads are bounded to max_error_body_bytes (2048)."""
+    huge_error = "E" * 25000
+    resp = httpx.Response(500, text=huge_error)
+    bounded = read_bounded_error(resp)
+    assert bounded is not None
+    assert len(bounded) == 2048
+
+
 @pytest.mark.asyncio
 async def test_discord_fatal_400_aborts_without_retry():
     """Simulates 400 Bad Request which should immediately raise NonRetryableError."""
@@ -80,7 +112,6 @@ async def test_discord_fatal_400_aborts_without_retry():
         with pytest.raises(NonRetryableError):
             await sender.send_to_discord("https://discord.mock/webhook", {"content": "bad payload"})
 
-    # Must NOT retry 400 errors
     assert call_count == 1
 
 
@@ -97,6 +128,8 @@ async def test_discord_exhaust_retries_raises():
     transport = httpx.MockTransport(mock_handler)
     async with httpx.AsyncClient(transport=transport) as client:
         sender = DiscordSender(client=client, max_retries=3)
+        sender.policy.initial_backoff = 0.01
+        sender.policy.jitter = 0.0
         with pytest.raises(RetryableError):
             await sender.send_to_discord("https://discord.mock/webhook", {"content": "persistent failure"})
 

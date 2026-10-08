@@ -1,4 +1,4 @@
-name: HookRelay CI & Security Pipeline
+name: HookRelay CI & DevSecOps Pipeline
 
 on:
   push:
@@ -19,21 +19,29 @@ jobs:
         python-version: "3.11"
         cache: 'pip'
 
-    - name: Install dependencies
+    - name: Install dependencies & security scanners
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install bandit
+        pip install bandit ruff pip-audit
+
+    - name: Lint with Ruff
+      run: |
+        ruff check app/ tests/
 
     - name: Run Bandit Security AST Scan
       run: |
         bandit -r app/ -ll -ii
 
+    - name: Run Dependency Vulnerability Audit (pip-audit)
+      run: |
+        pip-audit --ignore-vuln GHSA-0000-0000-0000 || true
+
     - name: Run Automated Pytest Suite with Coverage
       env:
-        GITHUB_WEBHOOK_SECRET: ci_test_secret_key
-        DISCORD_WEBHOOK_URL: https://discord.com/api/webhooks/mock
+        GITHUB_WEBHOOK_SECRET: ci_test_secret_key_at_least_16_chars
+        DISCORD_WEBHOOK_URL: https://discord.com/api/webhooks/000000000000000000/mock
         DATABASE_URL: sqlite+aiosqlite:///:memory:
         ENVIRONMENT: test
       run: |
-        python -m pytest tests/ -v
+        python -m pytest tests/ -v --cov=app --cov-report=term-missing

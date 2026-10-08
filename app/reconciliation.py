@@ -1,11 +1,15 @@
 import asyncio
+from datetime import datetime, timezone, timedelta
 import json
 import logging
-from typing import Optional
+from typing import Optional, Union
+import uuid
 import httpx
 
 from app.config import settings
+from app.dispatcher import ResilientDispatcher
 from app.formatter import format_payload
+from app.routing import parse_persisted_destinations
 from app.sender import DiscordSender
 from app.store import DeliveryStore
 from app.metrics import RECONCILIATION_RUNS_TOTAL, RECONCILIATION_RECOVERED_TOTAL
@@ -15,53 +19,96 @@ logger = logging.getLogger("hookrelay.reconciliation")
 
 async def run_reconciliation_cycle(
     store: DeliveryStore,
-    sender: DiscordSender,
+    sender: Union[ResilientDispatcher, DiscordSender],
     discord_webhook_url: str,
     client: httpx.AsyncClient,
-    stale_threshold_seconds: int = 120
+    stale_threshold_seconds: int = 120,
+    batch_size: Optional[int] = None,
+    max_batches: Optional[int] = None,
+    worker_id: Optional[str] = None,
 ) -> int:
     """
-    Executes a single reconciliation sweep.
-    Detects deliveries that remain in status 'received' beyond the threshold,
-    indicating the worker crashed or restart occurred before delivery was finalized.
-    Re-drives each delivery safely.
+    Executes a reconciliation sweep with atomic worker leasing and original destination preservation.
+    1. Queries candidate stale deliveries in batches.
+    2. Attempts an atomic lease (UPDATE ... WHERE ... RETURNING) per delivery.
+       If another worker or replica already claimed it, skips it (preventing duplicate sends).
+    3. Reconstructs the exact persisted destinations (Discord, Slack, HTTP) and dispatches.
     """
     RECONCILIATION_RUNS_TOTAL.inc()
-    stale_deliveries = await store.fetch_stale_deliveries(older_than_seconds=stale_threshold_seconds)
-    if not stale_deliveries:
-        return 0
-
-    logger.warning(f"Reconciliation engine detected {len(stale_deliveries)} stranded 'received' deliveries.")
+    effective_batch_size = batch_size or settings.reconciliation_batch_size
+    effective_max_batches = max_batches or settings.reconciliation_max_batches_per_cycle
+    wid = worker_id or f"reconciler-{uuid.uuid4().hex[:8]}"
     recovered_count = 0
 
-    for item in stale_deliveries:
-        logger.info(f"Re-driving stranded delivery: {item.delivery_id} (event: {item.event_type})")
-        payload = {}
-        if item.payload:
-            try:
-                payload = json.loads(item.payload)
-            except Exception:
-                payload = {}
+    for _ in range(effective_max_batches):
+        stale_candidates = await store.fetch_stale_deliveries(
+            older_than_seconds=stale_threshold_seconds,
+            batch_size=effective_batch_size
+        )
+        if not stale_candidates:
+            break
 
-        formatted_msg = format_payload(item.event_type, payload, use_embeds=settings.enable_embeds)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_threshold_seconds)
+        leased_in_batch = 0
 
-        try:
-            attempts = await sender.send_to_discord(discord_webhook_url, formatted_msg, client=client)
-            await store.mark_sent(item.delivery_id, attempts=item.attempts + attempts)
-            RECONCILIATION_RECOVERED_TOTAL.inc()
-            recovered_count += 1
-            logger.info(f"Successfully recovered stranded delivery: {item.delivery_id}")
-        except Exception as exc:
-            err_msg = f"Recovery attempt failed: {str(exc)}"
-            logger.error(f"Failed re-driving {item.delivery_id}: {err_msg}")
-            await store.mark_failed(item.delivery_id, attempts=item.attempts + 1, error=err_msg)
+        for candidate in stale_candidates:
+            # Atomic lease acquisition prevents race conditions across multiple workers/replicas
+            leased = await store.acquire_lease(
+                delivery_id=candidate.delivery_id,
+                worker_id=wid,
+                lease_seconds=settings.worker_lease_seconds,
+                require_stale_before=cutoff
+            )
+            if leased is None:
+                continue
+
+            leased_in_batch += 1
+            payload = {}
+            if leased.payload:
+                try:
+                    payload = json.loads(leased.payload)
+                except Exception:
+                    payload = {}
+
+            destinations = parse_persisted_destinations(
+                leased.destinations,
+                default_url=discord_webhook_url
+            )
+
+            if isinstance(sender, ResilientDispatcher):
+                ok = await sender.dispatch_job(
+                    delivery_id=leased.delivery_id,
+                    event_type=leased.event_type,
+                    payload=payload,
+                    destinations=destinations,
+                    client=client
+                )
+                if ok:
+                    RECONCILIATION_RECOVERED_TOTAL.inc()
+                    recovered_count += 1
+            else:
+                # Support direct DiscordSender in unit tests while still honoring multi-destination if present
+                dispatcher = ResilientDispatcher(store=store, max_retries=sender.max_retries)
+                ok = await dispatcher.dispatch_job(
+                    delivery_id=leased.delivery_id,
+                    event_type=leased.event_type,
+                    payload=payload,
+                    destinations=destinations,
+                    client=client
+                )
+                if ok:
+                    RECONCILIATION_RECOVERED_TOTAL.inc()
+                    recovered_count += 1
+
+        if len(stale_candidates) < effective_batch_size or leased_in_batch == 0:
+            break
 
     return recovered_count
 
 
 async def reconciliation_worker_loop(
     store: DeliveryStore,
-    sender: DiscordSender,
+    sender: Union[ResilientDispatcher, DiscordSender],
     discord_webhook_url: str,
     client: httpx.AsyncClient,
     interval_seconds: int = 60,
