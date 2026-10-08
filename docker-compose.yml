@@ -1,0 +1,33 @@
+services:
+  hookrelay:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - GITHUB_WEBHOOK_SECRET=super_secret_github_key_123
+      - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/mock/test
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/hookrelay
+      - ENABLE_EMBEDS=true
+      - ENABLE_RECONCILIATION=true
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: hookrelay
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d hookrelay"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
