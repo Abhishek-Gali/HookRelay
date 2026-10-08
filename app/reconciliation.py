@@ -81,7 +81,9 @@ async def run_reconciliation_cycle(
                     event_type=leased.event_type,
                     payload=payload,
                     destinations=destinations,
-                    client=client
+                    client=client,
+                    worker_id=wid,
+                    trigger_type="reconciliation"
                 )
                 if ok:
                     RECONCILIATION_RECOVERED_TOTAL.inc()
@@ -94,7 +96,9 @@ async def run_reconciliation_cycle(
                     event_type=leased.event_type,
                     payload=payload,
                     destinations=destinations,
-                    client=client
+                    client=client,
+                    worker_id=wid,
+                    trigger_type="reconciliation"
                 )
                 if ok:
                     RECONCILIATION_RECOVERED_TOTAL.inc()

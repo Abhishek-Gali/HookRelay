@@ -3,10 +3,10 @@
 [![CI & DevSecOps](https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com)
-[![Tests: 55 Passed](https://img.shields.io/badge/tests-55%20passed-success.svg)](https://github.com/Abhishek-Gali/HookRelay)
+[![Tests: 59 Passed](https://img.shields.io/badge/tests-59%20passed-success.svg)](https://github.com/Abhishek-Gali/HookRelay)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **HookRelay** is a security-hardened, production-oriented webhook ingestion and multi-provider delivery gateway (`GitHub ➔ HookRelay ➔ Discord / Slack / Generic HTTP`). Engineered with raw-byte HMAC-SHA256 verification, SQL-backed durable job queueing with atomic worker leases (`worker_id` + `locked_until`), unified retry policies respecting `Retry-After`, SSRF-validated multi-destination routing, a Dead Letter Queue (DLQ) with destination-preserving replay, RBAC-protected management APIs, and an XSS-hardened operations console.
+> **HookRelay** is a security-hardened, production-oriented webhook ingestion and multi-provider delivery gateway (`GitHub ➔ HookRelay ➔ Discord / Slack / Generic HTTP`). Engineered with raw-byte HMAC-SHA256 verification, SQL-backed durable job queueing with atomic worker leases + lease heartbeats (`worker_id` + `locked_until` + `FOR UPDATE SKIP LOCKED`), unified retry policies respecting `Retry-After`, DNS-validated SSRF-safe multi-destination routing, a Dead Letter Queue (DLQ) with destination-preserving replay, RBAC-protected management APIs, and an XSS/CSRF-hardened operations console.
 
 ---
 
@@ -18,9 +18,9 @@ GitHub Webhook
       ▼
 ┌──────────────────────────────────────────────────────────┐
 │ FastAPI Ingestion Gateway (/webhook/github)              │
-│  • Sliding-Window Rate Limiter (300 req/min/IP)          │
+│  • Bounded-Memory Rate Limiter (300 req/min/IP + LRU)    │
 │  • Constant-Time HMAC Verification (hmac.compare_digest) │
-│  • Routing Engine (Branch/Repo Filters + SSRF Checks)    │
+│  • Routing Engine (Branch/Repo Filters + DNS SSRF Check) │
 └─────────────────────────────┬────────────────────────────┘
                               │ Atomic INSERT ... ON CONFLICT DO NOTHING
                               ▼
@@ -28,11 +28,11 @@ GitHub Webhook
 │ PostgreSQL / SQLite Durable Store                        │
 │  • deliveries (status, payload, destinations JSON)       │
 │  • Lease Columns: worker_id, locked_until, next_run_at   │
-│  • delivery_attempts (per-call HTTP status, latency, err)│
-│  • audit_logs (auth failures, RBAC denials, replays)     │
+│  • delivery_attempts (status, trigger_type, latency, err)│
+│  • audit_logs (auth/CSRF failures, RBAC denials, replays)│
 └──────────────┬─────────────────────────────┬─────────────┘
-               │ Atomic Lease Acquisition    │ Expired Lease / Stale Sweep
-               │ (UPDATE ... RETURNING)      │ (Multi-batch atomic lease)
+               │ Atomic Lease + Heartbeat    │ Expired Lease / Stale Sweep
+               │ (SKIP LOCKED / RETURNING)   │ (Multi-batch atomic lease)
                ▼                             ▼
 ┌───────────────────────────┐   ┌──────────────────────────┐
 │ Durable Queue Worker      │   │ Reconciliation Worker    │
@@ -53,21 +53,23 @@ GitHub Webhook
 - **Zero Production Default Credentials (`app/config.py`)**: Startup validation rejects blank, weak (`<32` char), or known placeholder keys (`hr_admin_secret_key_12345`, etc.) when `ENVIRONMENT=production`.
 - **Timing-Safe Raw-Byte HMAC-SHA256 (`app/security.py`)**: Computed strictly over raw request stream bytes before JSON parsing and compared via `hmac.compare_digest`.
 - **Streaming Payload DoS Protection (`read_bounded_body_stream` in `app/main.py`)**: Enforces the 5 MB limit chunk-by-chunk on the incoming stream before buffering into memory, returning HTTP 413 immediately on oversized chunked transfers.
-- **API Key Authentication, RBAC & Brute-Force Lockout (`app/auth.py`, `app/ratelimit.py`)**:
-  - Management endpoints (`/api/*`) require `X-API-Key` headers verified against SHA-256 hashes in constant time.
+- **Dual Authentication (API Key + `HttpOnly` Session Cookie with CSRF), RBAC & Brute-Force Lockout (`app/auth.py`, `app/ratelimit.py`)**:
+  - Programmatic API clients authenticate via `X-API-Key` verified against SHA-256 hashes in constant time.
+  - Browser console operators exchange their key at `POST /api/auth/login` for an `HttpOnly; SameSite=Strict` session cookie (`hr_session`) and must supply `X-CSRF-Token` on all state-changing requests.
   - Role hierarchy: `ADMIN` (full control + DLQ discard + audit logs), `OPERATOR` (read + redrive), `VIEWER` (read-only).
-  - Separate rate limits for `/webhook/github` (300/min), `/api/*` (60/min), `/api/*/redrive` (10/min), and failed auth lockout (10 failures/min/IP).
-- **SSRF Protection on Destination URLs (`app/routing.py`)**: Blocks non-HTTPS schemes, `localhost`, loopback (`127.0.0.0/8`, `::1`), RFC1918 private networks (`10/8`, `172.16/12`, `192.168/16`), and cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`).
-- **Stored-XSS & CSP Hardening (`app/ui/dashboard.html`, `app/main.py`)**:
+  - Bounded-memory LRU rate limiters (`max_buckets=10,000`) for `/webhook/github` (300/min), `/api/*` (60/min), `/api/*/redrive` (10/min), and failed auth lockout (10 failures/min/IP).
+- **Connect-Time DNS-Rebinding & Redirect SSRF Protection (`app/routing.py`, `app/providers.py`)**: Blocks non-HTTPS schemes, `localhost`, loopback (`127.0.0.0/8`, `::1`), RFC1918 private networks (`10/8`, `172.16/12`, `192.168/16`), cloud metadata endpoints (`169.254.169.254`), resolves DNS `A`/`AAAA` records (including IPv4-mapped and NAT64 prefixes) before outbound dispatch, and enforces `follow_redirects=False`.
+- **Stored-XSS & Strict CSP without `'unsafe-inline'` (`app/ui/dashboard.html`, `app/ui/dashboard.js`, `app/main.py`)**:
   - Operations console renders all untrusted webhook and downstream error data exclusively via `document.createElement()` and `.textContent` (zero `innerHTML` interpolation).
-  - Zero external CDN dependencies; protected by `Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; object-src 'none'`.
+  - Externalized `/static/dashboard.js` and `/static/dashboard.css` enable `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'` and `X-XSS-Protection: 0`.
+- **Operational Secret Redaction (`sanitize_error_message` in `app/providers.py`)**: Automatically redacts Discord/Slack webhook tokens from downstream error strings before persisting or logging.
 
 ### ⚙️ Distributed Systems & Queue Reliability
 - **SQL-Backed Durable Job Queue (`DatabaseQueueBroker` in `app/queue_broker.py`)**:
   - Jobs are persisted in the SQL `deliveries` table at ingestion time—surviving process crashes and container restarts without data loss.
-- **Atomic Worker Leases (`acquire_lease` in `app/store.py`)**:
-  - Workers and reconciliation sweeps acquire exclusive time-bounded leases (`status = 'processing'`, `worker_id`, `locked_until`) via atomic `UPDATE ... WHERE ... RETURNING delivery_id`.
-  - Guarantees two concurrent workers or reconciliation replicas can **never** double-claim the same job.
+- **Atomic Worker Leases + Lease Heartbeat Renewal (`acquire_lease`, `renew_lease` in `app/store.py`)**:
+  - Workers and reconciliation sweeps acquire exclusive time-bounded leases (`status = 'processing'`, `worker_id`, `locked_until`) using `FOR UPDATE SKIP LOCKED` on PostgreSQL and atomic `UPDATE ... RETURNING` on SQLite.
+  - Active workers automatically heartbeat/extend their lease during in-flight deliveries and long `Retry-After` waits so active deliveries never expire mid-flight.
 - **Destination-Preserving Reconciliation & Redrive**:
   - Resolved routing destinations (`[{"provider": "discord", "url": "..."}, ...]`) are persisted as structured JSON at ingestion time.
   - Both crash reconciliation and `POST /api/deliveries/{id}/redrive` restore the exact original destinations unless `?reroute=true` is explicitly requested.

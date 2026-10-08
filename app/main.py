@@ -7,18 +7,27 @@ from contextlib import asynccontextmanager
 from typing import Optional, List
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends, status, Query, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from pydantic import BaseModel
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.config import settings
 from app.security import verify_signature
 from app.store import store, DeliveryStore, IllegalStateTransitionError
 from app.models import DeliveryDTO, AuditLogDTO
-from app.auth import get_current_user_role, require_role, Role
+from app.auth import (
+    get_current_user_role,
+    require_role,
+    Role,
+    authenticate_raw_key,
+    session_manager,
+    _audit_security_event,
+)
 from app.ratelimit import (
     check_rate_limit,
     check_api_rate_limit,
     check_redrive_rate_limit,
+    auth_failure_limiter,
 )
 from app.routing import routing_engine, RouteDestination, parse_persisted_destinations
 from app.dispatcher import ResilientDispatcher
@@ -79,7 +88,7 @@ async def read_bounded_body_stream(request: Request, max_bytes: int) -> bytes:
         if len(buffer) > max_bytes:
             WEBHOOK_REQUESTS_TOTAL.labels(event="unknown", outcome="rejected_size").inc()
             raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status_code=413,
                 detail="Payload stream exceeds maximum allowed size."
             )
     return bytes(buffer)
@@ -99,9 +108,11 @@ async def queue_worker_loop():
             event_type = job["event_type"]
             payload = job["payload"]
             destinations = [RouteDestination(**d) for d in job["destinations"]]
+            wid = job.get("worker_id")
+            trigger_type = job.get("trigger_type", "initial")
 
             logger.info(
-                f"Worker [{job.get('worker_id')}] processing leased job: "
+                f"Worker [{wid}] processing leased job: "
                 f"{delivery_id} ({event_type}) -> {len(destinations)} destination(s)"
             )
             await dispatcher.dispatch_job(
@@ -109,7 +120,9 @@ async def queue_worker_loop():
                 event_type=event_type,
                 payload=payload,
                 destinations=destinations,
-                client=http_client
+                client=http_client,
+                worker_id=wid,
+                trigger_type=trigger_type
             )
         except asyncio.CancelledError:
             break
@@ -125,7 +138,7 @@ async def lifespan(app: FastAPI):
     _sync_store_bindings()
     await store.init_db()
     await queue_broker.start()
-    http_client = httpx.AsyncClient(timeout=settings.request_timeout_seconds)
+    http_client = httpx.AsyncClient(timeout=settings.request_timeout_seconds, follow_redirects=False)
 
     worker_task = asyncio.create_task(queue_worker_loop())
 
@@ -170,17 +183,18 @@ async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["X-XSS-Protection"] = "0"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https:; "
+        "script-src 'self'; "
+        "style-src 'self'; "
+        "img-src 'self' data:; "
         "connect-src 'self'; "
         "frame-ancestors 'none'; "
-        "object-src 'none';"
+        "object-src 'none'; "
+        "base-uri 'self';"
     )
     return response
 
@@ -431,8 +445,100 @@ async def list_audit_logs(
 
 
 # =====================================================================
-# 3. OBSERVABILITY, LIVENESS/READINESS PROBES & LIVE DASHBOARD
+# 3. DASHBOARD SESSION AUTHENTICATION (HttpOnly Cookie + CSRF)
 # =====================================================================
+class LoginRequest(BaseModel):
+    api_key: str
+
+
+@app.post("/api/auth/login", dependencies=[Depends(check_api_rate_limit)])
+async def login_session(body: LoginRequest, request: Request, response: Response):
+    """
+    Exchanges a valid API key for an HttpOnly, SameSite=Strict session cookie
+    and a per-session CSRF token so the browser console does not retain raw keys.
+    """
+    _sync_store_bindings()
+    client_ip = request.client.host if request.client else "unknown"
+    if auth_failure_limiter.count_recent(client_ip) >= settings.auth_failure_limit_per_minute:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed authentication attempts. Try again later."
+        )
+
+    role = authenticate_raw_key(body.api_key)
+    if role is None:
+        auth_failure_limiter.is_allowed(client_ip, settings.auth_failure_limit_per_minute)
+        await _audit_security_event(
+            request,
+            actor_role="UNAUTHENTICATED",
+            action="auth_failed",
+            status_str="denied",
+            details="Invalid API key at /api/auth/login"
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key.")
+
+    session_id, csrf_token = session_manager.create_session(role)
+    response.set_cookie(
+        key="hr_session",
+        value=session_id,
+        httponly=True,
+        samesite="strict",
+        secure=(settings.environment == "production"),
+        max_age=28800,
+        path="/"
+    )
+    await _audit_security_event(
+        request,
+        actor_role=role.value,
+        action="session_login",
+        status_str="success",
+        details="Browser session created"
+    )
+    return {"authenticated": True, "role": role.value, "csrf_token": csrf_token}
+
+
+@app.post("/api/auth/logout", dependencies=[Depends(check_api_rate_limit)])
+async def logout_session(request: Request, response: Response):
+    """Revokes the active browser session and clears the HttpOnly cookie."""
+    session_cookie = request.cookies.get("hr_session")
+    if session_cookie:
+        session_manager.revoke_session(session_cookie)
+    response.delete_cookie(key="hr_session", path="/")
+    return {"authenticated": False}
+
+
+@app.get("/api/auth/me", dependencies=[Depends(check_api_rate_limit)])
+async def current_session_info(request: Request):
+    """Returns current session state and CSRF token if an HttpOnly session is active."""
+    session_cookie = request.cookies.get("hr_session")
+    sess = session_manager.get_session(session_cookie)
+    if not sess:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No active session.")
+    role, csrf_token = sess
+    return {"authenticated": True, "role": role.value, "csrf_token": csrf_token}
+
+
+# =====================================================================
+# 4. OBSERVABILITY, LIVENESS/READINESS PROBES & LIVE DASHBOARD
+# =====================================================================
+_ALLOWED_STATIC_ASSETS = {
+    "dashboard.css": ("text/css; charset=utf-8", "dashboard.css"),
+    "dashboard.js": ("application/javascript; charset=utf-8", "dashboard.js"),
+}
+
+
+@app.get("/static/{asset_name}")
+async def serve_static_asset(asset_name: str):
+    """Serves whitelisted static dashboard assets (CSS/JS) for strict CSP compliance."""
+    if asset_name not in _ALLOWED_STATIC_ASSETS:
+        raise HTTPException(status_code=404, detail="Static asset not found.")
+    media_type, filename = _ALLOWED_STATIC_ASSETS[asset_name]
+    asset_path = os.path.join(os.path.dirname(__file__), "ui", filename)
+    if not os.path.exists(asset_path):
+        raise HTTPException(status_code=404, detail="Static asset file missing.")
+    return FileResponse(asset_path, media_type=media_type)
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def serve_dashboard():
     """Serves the XSS-hardened operations console."""

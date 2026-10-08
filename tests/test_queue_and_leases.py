@@ -117,4 +117,13 @@ async def test_worker_lease_prevents_duplicate_processing_and_reclaims_when_expi
     assert lease_b_reclaimed is not None
     assert lease_b_reclaimed.worker_id == "worker-B"
 
+    # Worker B renews its lease (heartbeat) -> locked_until extends further
+    renewed = await store.renew_lease("del-lease-exp-001", worker_id="worker-B", lease_seconds=300)
+    assert renewed is True
+
+    # Worker A cannot renew a lease owned by Worker B
+    wrong_worker_renew = await store.renew_lease("del-lease-exp-001", worker_id="worker-A", lease_seconds=300)
+    assert wrong_worker_renew is False
+
     await store.close()
+

@@ -12,6 +12,17 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Secret Scanning (Gitleaks)
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Dependency Review (Pull Requests)
+      if: github.event_name == 'pull_request'
+      uses: actions/dependency-review-action@v4
 
     - name: Set up Python 3.11
       uses: actions/setup-python@v5
@@ -35,7 +46,7 @@ jobs:
 
     - name: Run Dependency Vulnerability Audit (pip-audit)
       run: |
-        pip-audit --ignore-vuln GHSA-0000-0000-0000 || true
+        pip-audit -r requirements.txt
 
     - name: Run Automated Pytest Suite with Coverage
       env:

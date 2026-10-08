@@ -93,3 +93,24 @@ def test_original_route_preserved():
     assert len(restored) == 1
     assert restored[0].provider == "slack"
     assert restored[0].url == "https://hooks.slack.com/services/original"
+
+
+def test_dns_rebinding_hostname_rejected(monkeypatch):
+    """Proves a custom domain whose DNS A record resolves to 127.0.0.1 or 169.254.169.254 is blocked."""
+    import socket
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        if host == "rebind-loopback.attacker.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+        if host == "rebind-metadata.attacker.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))]
+        raise socket.gaierror("mocked offline")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(ValidationError, match="SSRF Protection"):
+        RouteDestination(provider="http", url="https://rebind-loopback.attacker.com/hook")
+
+    with pytest.raises(ValidationError, match="SSRF Protection"):
+        RouteDestination(provider="http", url="https://rebind-metadata.attacker.com/hook")
+

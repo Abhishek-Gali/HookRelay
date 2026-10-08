@@ -20,6 +20,7 @@ from app.ratelimit import (
     redrive_rate_limiter,
     auth_failure_limiter,
 )
+from app.auth import session_manager
 import app.main as main_module
 from app.main import app
 from app.security import calculate_signature
@@ -32,6 +33,7 @@ async def setup_test_db():
     api_rate_limiter.reset()
     redrive_rate_limiter.reset()
     auth_failure_limiter.reset()
+    session_manager.clear()
 
     test_store = DeliveryStore("sqlite+aiosqlite:///:memory:")
     await test_store.init_db()

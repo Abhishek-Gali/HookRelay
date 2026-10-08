@@ -199,6 +199,38 @@ class DeliveryStore:
                 )
                 return row_res.scalar_one_or_none()
 
+    async def renew_lease(
+        self,
+        delivery_id: str,
+        worker_id: str,
+        lease_seconds: int = 120
+    ) -> bool:
+        """
+        Extends an active worker lease (heartbeat) so long-running deliveries or
+        rate-limit Retry-After waits never expire while the worker is still alive.
+        """
+        now = datetime.now(timezone.utc)
+        lease_until = now + timedelta(seconds=lease_seconds)
+        async with self._db_lock:
+            async with self.session_factory() as session:
+                stmt = (
+                    update(DeliveryModel)
+                    .where(
+                        DeliveryModel.delivery_id == delivery_id,
+                        DeliveryModel.worker_id == worker_id,
+                        DeliveryModel.status == "processing"
+                    )
+                    .values(
+                        locked_until=lease_until,
+                        updated_at=now
+                    )
+                    .returning(DeliveryModel.delivery_id)
+                )
+                res = await session.execute(stmt)
+                renewed_id = res.scalar_one_or_none()
+                await session.commit()
+                return renewed_id is not None
+
     async def claim_next_runnable_job(
         self,
         worker_id: str,
@@ -206,33 +238,57 @@ class DeliveryStore:
     ) -> Optional[DeliveryModel]:
         """
         Polls the durable SQL table for the next runnable job and atomically leases it.
+        Uses FOR UPDATE SKIP LOCKED on PostgreSQL to eliminate row lock contention across replicas.
         Survives process restarts without losing queued jobs.
         """
         now = datetime.now(timezone.utc)
+        eligibility_cond = or_(
+            and_(
+                DeliveryModel.status.in_(["received", "queued", "retry_wait"]),
+                or_(
+                    DeliveryModel.locked_until.is_(None),
+                    DeliveryModel.locked_until <= now
+                ),
+                or_(
+                    DeliveryModel.next_run_at.is_(None),
+                    DeliveryModel.next_run_at <= now
+                )
+            ),
+            and_(
+                DeliveryModel.status == "processing",
+                DeliveryModel.locked_until.is_not(None),
+                DeliveryModel.locked_until <= now
+            )
+        )
+
+        if not self.is_sqlite:
+            # High-concurrency PostgreSQL path using native FOR UPDATE SKIP LOCKED
+            lease_until = now + timedelta(seconds=lease_seconds)
+            async with self._db_lock:
+                async with self.session_factory() as session:
+                    stmt = (
+                        select(DeliveryModel)
+                        .where(eligibility_cond)
+                        .order_by(DeliveryModel.created_at.asc())
+                        .limit(1)
+                        .with_for_update(skip_locked=True)
+                    )
+                    res = await session.execute(stmt)
+                    row = res.scalar_one_or_none()
+                    if row is None:
+                        return None
+                    row.status = "processing"
+                    row.worker_id = worker_id
+                    row.locked_until = lease_until
+                    row.updated_at = now
+                    await session.commit()
+                    return row
+
         async with self._db_lock:
             async with self.session_factory() as session:
                 stmt = (
                     select(DeliveryModel.delivery_id)
-                    .where(
-                        or_(
-                            and_(
-                                DeliveryModel.status.in_(["received", "queued", "retry_wait"]),
-                                or_(
-                                    DeliveryModel.locked_until.is_(None),
-                                    DeliveryModel.locked_until <= now
-                                ),
-                                or_(
-                                    DeliveryModel.next_run_at.is_(None),
-                                    DeliveryModel.next_run_at <= now
-                                )
-                            ),
-                            and_(
-                                DeliveryModel.status == "processing",
-                                DeliveryModel.locked_until.is_not(None),
-                                DeliveryModel.locked_until <= now
-                            )
-                        )
-                    )
+                    .where(eligibility_cond)
                     .order_by(DeliveryModel.created_at.asc())
                     .limit(5)
                 )
@@ -253,17 +309,20 @@ class DeliveryStore:
         http_status: Optional[int],
         response_time_ms: float,
         error_message: Optional[str] = None,
-        response_headers: Optional[str] = None
+        response_headers: Optional[str] = None,
+        trigger_type: str = "initial"
     ) -> None:
         """Records a granular delivery attempt for auditability and observability."""
+        from app.providers import sanitize_error_message
         now = datetime.now(timezone.utc)
-        bounded_err = error_message[:settings.max_error_body_bytes] if error_message else None
+        bounded_err = sanitize_error_message(error_message) if error_message else None
         async with self._db_lock:
             async with self.session_factory() as session:
                 attempt = DeliveryAttemptModel(
                     delivery_id=delivery_id,
                     destination=destination,
                     attempt_number=attempt_number,
+                    trigger_type=trigger_type,
                     http_status=http_status,
                     response_time_ms=response_time_ms,
                     error_message=bounded_err,
@@ -330,13 +389,14 @@ class DeliveryStore:
         backoff_seconds: float
     ) -> None:
         """Marks a delivery as waiting for next retry backoff window."""
+        from app.providers import sanitize_error_message
         now = datetime.now(timezone.utc)
         await self._transition_state(
             delivery_id=delivery_id,
             target_status="retry_wait",
             extra_values={
                 "attempts": attempts,
-                "last_error": error[:settings.max_error_body_bytes],
+                "last_error": sanitize_error_message(error) or "Retry scheduled",
                 "locked_until": None,
                 "worker_id": None,
                 "next_run_at": now + timedelta(seconds=backoff_seconds),
@@ -345,12 +405,13 @@ class DeliveryStore:
 
     async def mark_failed_or_dlq(self, delivery_id: str, attempts: int, error: str) -> None:
         """Moves delivery to dead_letter (DLQ) after retries are exhausted."""
+        from app.providers import sanitize_error_message
         await self._transition_state(
             delivery_id=delivery_id,
             target_status="dead_letter",
             extra_values={
                 "attempts": attempts,
-                "last_error": error[:settings.max_error_body_bytes],
+                "last_error": sanitize_error_message(error) or "Exhausted retries",
                 "locked_until": None,
                 "worker_id": None,
                 "next_run_at": None,

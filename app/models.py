@@ -88,6 +88,7 @@ class DeliveryAttemptModel(Base):
     delivery_id = Column(String, ForeignKey("deliveries.delivery_id", ondelete="CASCADE"), nullable=False, index=True)
     destination = Column(String, nullable=False, default="discord")
     attempt_number = Column(Integer, nullable=False)
+    trigger_type = Column(String, nullable=False, default="initial")  # 'initial' | 'retry' | 'reconciliation' | 'redrive'
     http_status = Column(Integer, nullable=True)
     response_time_ms = Column(Float, nullable=True)
     error_message = Column(Text, nullable=True)
@@ -130,6 +131,7 @@ class DeliveryAttemptDTO(BaseModel):
 
     attempt_number: int
     destination: str
+    trigger_type: str = "initial"
     http_status: Optional[int] = None
     response_time_ms: Optional[float] = None
     error_message: Optional[str] = None

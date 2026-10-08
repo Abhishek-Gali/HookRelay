@@ -7,15 +7,27 @@ WEBHOOK_REQUESTS_TOTAL = Counter(
     ["event", "outcome"]  # outcome: accepted, duplicate, ping, rejected_signature, rejected_size
 )
 
+PROVIDER_DISPATCHES_TOTAL = Counter(
+    "hookrelay_provider_dispatches_total",
+    "Total messages dispatched to downstream notification providers",
+    ["provider", "event", "status"]  # provider: discord, slack, http | status: sent, failed
+)
+
+PROVIDER_RETRIES_TOTAL = Counter(
+    "hookrelay_provider_retries_total",
+    "Total retry attempts made when delivering to downstream notification providers",
+    ["provider"]
+)
+
 DISCORD_DISPATCHES_TOTAL = Counter(
     "hookrelay_discord_dispatches_total",
-    "Total messages dispatched to Discord",
+    "Total messages dispatched to Discord (legacy compatibility metric)",
     ["event", "status"]  # status: sent, failed
 )
 
 DISCORD_RETRIES_TOTAL = Counter(
     "hookrelay_discord_retries_total",
-    "Total retry attempts made when delivering to Discord"
+    "Total retry attempts made when delivering to Discord (legacy compatibility metric)"
 )
 
 WEBHOOK_RESPONSE_SECONDS = Histogram(

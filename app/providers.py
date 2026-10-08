@@ -1,8 +1,28 @@
 from abc import ABC, abstractmethod
+import re
 from typing import Any, Dict, Optional, Tuple
 import httpx
 from app.config import settings
 from app.formatter import format_payload, sanitize_mentions, truncate
+
+_WEBHOOK_SECRET_RE = re.compile(
+    r"(/api/webhooks/\d+/)([A-Za-z0-9_\-\.]+)|(/services/T[A-Za-z0-9_]+/B[A-Za-z0-9_]+/)([A-Za-z0-9_\-\.]+)",
+    re.IGNORECASE
+)
+
+
+def sanitize_error_message(raw_msg: Optional[str]) -> Optional[str]:
+    """
+    Redacts webhook secret tokens or sensitive URLs from error strings and bounds length
+    to settings.max_error_body_bytes to prevent operational credential/info leakage.
+    """
+    if not raw_msg:
+        return None
+    cleaned = _WEBHOOK_SECRET_RE.sub(
+        lambda m: f"{m.group(1) or m.group(3)}[REDACTED]",
+        str(raw_msg)
+    )
+    return cleaned[: settings.max_error_body_bytes]
 
 
 def extract_retry_after(resp: httpx.Response) -> Optional[float]:
@@ -32,14 +52,26 @@ def extract_retry_after(resp: httpx.Response) -> Optional[float]:
 
 
 def read_bounded_error(resp: httpx.Response) -> Optional[str]:
-    """Reads at most settings.max_error_body_bytes characters from an error response."""
-    if resp.status_code < 400:
+    """Reads at most settings.max_error_body_bytes characters from an error response and redacts secrets."""
+    if resp.status_code < 300:
         return None
+    if 300 <= resp.status_code < 400:
+        return f"Redirect responses ({resp.status_code}) are disallowed by SSRF policy."
     try:
         raw_text = resp.text or ""
-        return raw_text[: settings.max_error_body_bytes]
+        return sanitize_error_message(raw_text)
     except Exception:
         return f"HTTP {resp.status_code}"
+
+
+def _enforce_outbound_ssrf_guard(destination_url: str) -> None:
+    """Re-validates destination URL and DNS resolution right before outbound connection (anti-DNS-rebinding)."""
+    from app.routing import validate_ssrf_safe_url
+    validate_ssrf_safe_url(
+        destination_url,
+        allow_private=settings.allow_private_destinations,
+        resolve_dns=True
+    )
 
 
 class NotificationProvider(ABC):
@@ -80,12 +112,13 @@ class DiscordProvider(NotificationProvider):
         use_embeds: bool = True,
         delivery_id: Optional[str] = None
     ) -> Tuple[int, Optional[str], Optional[str]]:
+        _enforce_outbound_ssrf_guard(destination_url)
         body = format_payload(event_type, payload, use_embeds=use_embeds)
         headers = {"Content-Type": "application/json"}
         if delivery_id:
             headers["X-HookRelay-Delivery-ID"] = delivery_id
 
-        resp = await client.post(destination_url, json=body, headers=headers)
+        resp = await client.post(destination_url, json=body, headers=headers, follow_redirects=False)
         headers_summary = None
         if resp.status_code == 429:
             retry_after = extract_retry_after(resp)
@@ -108,6 +141,7 @@ class SlackProvider(NotificationProvider):
         use_embeds: bool = True,
         delivery_id: Optional[str] = None
     ) -> Tuple[int, Optional[str], Optional[str]]:
+        _enforce_outbound_ssrf_guard(destination_url)
         repo = truncate(sanitize_mentions(payload.get("repository", {}).get("full_name", "Repository")), 120)
         sender = truncate(sanitize_mentions(payload.get("sender", {}).get("login", "GitHub")), 80)
         safe_event = truncate(sanitize_mentions(event_type), 60)
@@ -129,7 +163,7 @@ class SlackProvider(NotificationProvider):
         if delivery_id:
             headers["X-HookRelay-Delivery-ID"] = delivery_id
 
-        resp = await client.post(destination_url, json=slack_body, headers=headers)
+        resp = await client.post(destination_url, json=slack_body, headers=headers, follow_redirects=False)
         headers_summary = None
         if resp.status_code == 429:
             retry_after = extract_retry_after(resp)
@@ -152,6 +186,7 @@ class GenericHttpProvider(NotificationProvider):
         use_embeds: bool = True,
         delivery_id: Optional[str] = None
     ) -> Tuple[int, Optional[str], Optional[str]]:
+        _enforce_outbound_ssrf_guard(destination_url)
         headers = {
             "Content-Type": "application/json",
             "X-HookRelay-Event": event_type,
@@ -160,7 +195,7 @@ class GenericHttpProvider(NotificationProvider):
         if delivery_id:
             headers["X-HookRelay-Delivery-ID"] = delivery_id
 
-        resp = await client.post(destination_url, json=payload, headers=headers)
+        resp = await client.post(destination_url, json=payload, headers=headers, follow_redirects=False)
         headers_summary = None
         if resp.status_code == 429:
             retry_after = extract_retry_after(resp)

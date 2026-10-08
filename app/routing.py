@@ -1,6 +1,7 @@
 import fnmatch
 import ipaddress
 import json
+import socket
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator
@@ -18,13 +19,68 @@ BLOCKED_HOSTNAMES = {
 }
 
 
-def validate_ssrf_safe_url(url: str, allow_private: bool = False) -> str:
+_NAT64_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
+
+
+def _assert_ip_is_public(ip_str: str, label: str = "") -> None:
+    """Raises ValueError if ip_str is loopback, private, link-local, metadata, or reserved."""
+    ip = ipaddress.ip_address(ip_str)
+    # Unwrap IPv4-mapped IPv6 (::ffff:0:0/96) or RFC 6052 NAT64 (64:ff9b::/96) to check the target IPv4
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        target_ip = mapped
+    elif isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64_PREFIX:
+        target_ip = ipaddress.IPv4Address(ip.packed[-4:])
+    else:
+        target_ip = ip
+
+    if (
+        target_ip.is_loopback
+        or target_ip.is_private
+        or target_ip.is_link_local
+        or target_ip.is_multicast
+        or target_ip.is_reserved
+        or target_ip.is_unspecified
+    ):
+        ctx = f" (resolved from '{label}')" if label and label != ip_str else ""
+        raise ValueError(
+            f"SSRF Protection: Private, loopback, or link-local IP address '{ip_str}'{ctx} is forbidden."
+        )
+
+
+def resolve_and_validate_hostname(hostname: str, allow_private: bool = False) -> None:
+    """
+    Resolves DNS records for hostname and verifies none of the returned A/AAAA records
+    point to private, loopback, link-local, or cloud metadata IPs (mitigating DNS rebinding).
+    """
+    if allow_private:
+        return
+    try:
+        addr_info = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        # If offline or unresolvable in unit test mocks, hostname literal checks still apply
+        return
+
+    for family, _, _, _, sockaddr in addr_info:
+        if family in (socket.AF_INET, socket.AF_INET6) and sockaddr:
+            resolved_ip = sockaddr[0]
+            # Strip IPv6 scope ID if present (e.g. fe80::1%eth0)
+            resolved_ip = resolved_ip.split("%")[0]
+            _assert_ip_is_public(resolved_ip, label=hostname)
+
+
+def validate_ssrf_safe_url(
+    url: str,
+    allow_private: bool = False,
+    resolve_dns: bool = True
+) -> str:
     """
     Validates destination webhook URLs against SSRF vectors:
     - Enforces HTTPS scheme (unless allow_private=True in local testing).
     - Blocks localhost, loopback (127.0.0.0/8, ::1), unspecified (0.0.0.0),
       private RFC1918 ranges (10/8, 172.16/12, 192.168/16),
       link-local / cloud metadata endpoints (169.254.169.254, 169.254.0.0/16, fe80::/10).
+    - Resolves hostname via DNS to block DNS-rebinding domains resolving to internal IPs.
     """
     if not url or not isinstance(url, str):
         raise ValueError("Destination URL must be a non-empty string.")
@@ -39,27 +95,25 @@ def validate_ssrf_safe_url(url: str, allow_private: bool = False) -> str:
         raise ValueError("Destination URL must include a valid hostname.")
 
     if not allow_private:
-        if hostname in BLOCKED_HOSTNAMES or hostname.endswith(".localhost") or hostname.endswith(".internal"):
+        if (
+            hostname in BLOCKED_HOSTNAMES
+            or hostname.endswith(".localhost")
+            or hostname.endswith(".internal")
+            or hostname.endswith(".local")
+        ):
             raise ValueError(f"SSRF Protection: Destination hostname '{hostname}' is forbidden.")
 
         # Check if hostname is an IP literal
         try:
-            ip = ipaddress.ip_address(hostname)
-            if (
-                ip.is_loopback
-                or ip.is_private
-                or ip.is_link_local
-                or ip.is_multicast
-                or ip.is_reserved
-                or ip.is_unspecified
-            ):
-                raise ValueError(
-                    f"SSRF Protection: Private, loopback, or link-local IP address '{hostname}' is forbidden."
-                )
-        except ValueError as exc:
-            if "SSRF Protection" in str(exc):
-                raise
-            # Hostname is a domain name, not an IP literal
+            ipaddress.ip_address(hostname)
+            is_ip_literal = True
+        except ValueError:
+            is_ip_literal = False
+
+        if is_ip_literal:
+            _assert_ip_is_public(hostname)
+        elif resolve_dns:
+            resolve_and_validate_hostname(hostname, allow_private=allow_private)
 
     return url.strip()
 
@@ -79,7 +133,7 @@ class RouteDestination(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_url_ssrf(cls, v: str) -> str:
-        return validate_ssrf_safe_url(v, allow_private=settings.allow_private_destinations)
+        return validate_ssrf_safe_url(v, allow_private=settings.allow_private_destinations, resolve_dns=True)
 
 
 class RouteRule(BaseModel):

@@ -134,3 +134,19 @@ async def test_discord_exhaust_retries_raises():
             await sender.send_to_discord("https://discord.mock/webhook", {"content": "persistent failure"})
 
     assert call_count == 3
+
+
+def test_webhook_secret_redacted_in_error_message():
+    """Proves Discord and Slack webhook secret tokens are redacted from stored error messages."""
+    from app.providers import sanitize_error_message
+
+    raw_err = (
+        "ConnectError for https://discord.com/api/webhooks/1234567890/super_secret_token_xyz "
+        "and https://hooks.slack.com/services/T111/B222/slack_secret_token_999"
+    )
+    redacted = sanitize_error_message(raw_err)
+    assert "super_secret_token_xyz" not in redacted
+    assert "slack_secret_token_999" not in redacted
+    assert "/api/webhooks/1234567890/[REDACTED]" in redacted
+    assert "/services/T111/B222/[REDACTED]" in redacted
+

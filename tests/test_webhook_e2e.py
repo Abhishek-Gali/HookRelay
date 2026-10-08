@@ -102,8 +102,8 @@ async def test_dashboard_xss_hardening_and_csp(async_client):
     Proves the dashboard:
     1. Does not ship with hardcoded 'hr_admin_secret_key_12345'.
     2. Does not load external third-party CDNs (cdnjs.cloudflare.com).
-    3. Does not use innerHTML to render untrusted delivery/error fields.
-    4. Includes a strict Content-Security-Policy header.
+    3. Serves external /static/dashboard.js and /static/dashboard.css with zero innerHTML.
+    4. Includes a strict Content-Security-Policy header WITHOUT 'unsafe-inline' and X-XSS-Protection: 0.
     """
     resp = await async_client.get("/dashboard")
     assert resp.status_code == 200
@@ -112,11 +112,83 @@ async def test_dashboard_xss_hardening_and_csp(async_client):
     assert "hr_admin_secret_key_12345" not in html
     assert "cdnjs.cloudflare.com" not in html
     assert "innerHTML" not in html
-    assert "textContent" in html
+    assert "<script>" not in html
 
     csp = resp.headers.get("Content-Security-Policy", "")
     assert "default-src 'self'" in csp
+    assert "script-src 'self'" in csp
+    assert "unsafe-inline" not in csp
     assert "frame-ancestors 'none'" in csp
+    assert resp.headers.get("X-XSS-Protection") == "0"
+
+    js_resp = await async_client.get("/static/dashboard.js")
+    assert js_resp.status_code == 200
+    assert "textContent" in js_resp.text
+    assert "innerHTML" not in js_resp.text
+
+    css_resp = await async_client.get("/static/dashboard.css")
+    assert css_resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_session_cookie_login_and_csrf_protection(async_client):
+    """
+    Proves the browser dashboard can authenticate via HttpOnly session cookie (/api/auth/login)
+    and that state-changing POST requests enforce X-CSRF-Token when using cookie auth.
+    """
+    login_resp = await async_client.post(
+        "/api/auth/login",
+        json={"api_key": settings.operator_api_key}
+    )
+    assert login_resp.status_code == 200
+    login_data = login_resp.json()
+    assert login_data["authenticated"] is True
+    assert login_data["role"] == "OPERATOR"
+    csrf_token = login_data["csrf_token"]
+    assert len(csrf_token) > 20
+    assert "hr_session" in login_resp.cookies
+    assert "HttpOnly" in login_resp.headers.get("set-cookie", "")
+
+    # Read-only GET works with session cookie alone (no X-API-Key header)
+    me_resp = await async_client.get("/api/auth/me")
+    assert me_resp.status_code == 200
+    assert me_resp.json()["role"] == "OPERATOR"
+
+    deliv_resp = await async_client.get("/api/deliveries")
+    assert deliv_resp.status_code == 200
+
+    # State-changing POST with cookie auth but WITHOUT X-CSRF-Token must fail with 403
+    no_csrf_post = await async_client.post("/api/deliveries/non-existent/redrive")
+    assert no_csrf_post.status_code == 403
+    assert "CSRF" in no_csrf_post.json()["detail"]
+
+    # State-changing POST with valid X-CSRF-Token passes CSRF check (returns 404 for non-existent ID)
+    with_csrf_post = await async_client.post(
+        "/api/deliveries/non-existent/redrive",
+        headers={"X-CSRF-Token": csrf_token}
+    )
+    assert with_csrf_post.status_code == 404
+
+    # Logout revokes session
+    logout_resp = await async_client.post(
+        "/api/auth/logout",
+        headers={"X-CSRF-Token": csrf_token}
+    )
+    assert logout_resp.status_code == 200
+    after_logout = await async_client.get("/api/auth/me")
+    assert after_logout.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_bounded_bucket_eviction():
+    """Proves SlidingWindowRateLimiter never exceeds max_buckets under unique IP floods."""
+    from app.ratelimit import SlidingWindowRateLimiter
+
+    limiter = SlidingWindowRateLimiter(limit_per_minute=5, window_seconds=60, max_buckets=50)
+    for i in range(200):
+        assert limiter.is_allowed(f"198.51.100.{i}") is True
+
+    assert len(limiter.requests) <= 50
 
 
 @pytest.mark.asyncio
@@ -173,6 +245,7 @@ async def test_metrics_access_control(async_client, monkeypatch):
     r_authed = await async_client.get("/metrics", headers={"X-API-Key": settings.viewer_api_key})
     assert r_authed.status_code == 200
     assert "hookrelay_webhook_requests_total" in r_authed.text
+    assert "hookrelay_provider_dispatches_total" in r_authed.text
 
 
 @pytest.mark.asyncio
@@ -212,3 +285,4 @@ async def test_healthz_live_and_ready_endpoints(async_client):
     assert ready.json()["status"] == "healthy"
     assert ready.json()["database"] == "connected"
     assert "queue_depth" in ready.json()
+

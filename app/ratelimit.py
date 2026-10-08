@@ -1,42 +1,82 @@
+from collections import OrderedDict
 import hashlib
 import time
-from collections import defaultdict
 from fastapi import Request, HTTPException, status
 from app.config import settings
 
 
 class SlidingWindowRateLimiter:
     """
-    Sliding-window rate limiter supporting distinct buckets (webhook IP, API key hash, redrive actions, auth failures).
+    Bounded-memory sliding-window rate limiter supporting distinct buckets
+    (webhook IP, API key hash, redrive actions, auth failures).
+    Automatically deletes empty buckets and enforces an upper bound (max_buckets)
+    with LRU eviction so spoofed-IP floods cannot cause unbounded memory growth.
     """
-    def __init__(self, limit_per_minute: int = 300, window_seconds: int = 60):
+    def __init__(
+        self,
+        limit_per_minute: int = 300,
+        window_seconds: int = 60,
+        max_buckets: int = 10000
+    ):
         self.limit_per_minute = limit_per_minute
         self.window_seconds = window_seconds
-        self.requests: dict[str, list[float]] = defaultdict(list)
+        self.max_buckets = max_buckets
+        self.requests: OrderedDict[str, list[float]] = OrderedDict()
+        self._last_sweep: float = time.time()
 
     def reset(self) -> None:
         self.requests.clear()
 
+    def _evict_stale_buckets(self, now: float) -> None:
+        cutoff = now - self.window_seconds
+        stale_keys = [
+            k for k, ts_list in self.requests.items()
+            if not ts_list or ts_list[-1] <= cutoff
+        ]
+        for k in stale_keys:
+            self.requests.pop(k, None)
+        self._last_sweep = now
+
+    def _prune_key(self, bucket_key: str, now: float) -> list[float]:
+        cutoff = now - self.window_seconds
+        timestamps = self.requests.get(bucket_key)
+        if not timestamps:
+            self.requests.pop(bucket_key, None)
+            return []
+        filtered = [t for t in timestamps if t > cutoff]
+        if filtered:
+            self.requests[bucket_key] = filtered
+            self.requests.move_to_end(bucket_key)
+        else:
+            self.requests.pop(bucket_key, None)
+        return filtered
+
     def is_allowed(self, bucket_key: str, override_limit: int | None = None) -> bool:
         limit = override_limit if override_limit is not None else self.limit_per_minute
         now = time.time()
-        cutoff = now - self.window_seconds
 
-        timestamps = self.requests[bucket_key]
-        self.requests[bucket_key] = [t for t in timestamps if t > cutoff]
+        # Periodic sweep or capacity-triggered sweep
+        if (now - self._last_sweep > self.window_seconds) or (len(self.requests) >= self.max_buckets):
+            self._evict_stale_buckets(now)
 
-        if len(self.requests[bucket_key]) >= limit:
+        filtered = self._prune_key(bucket_key, now)
+
+        if len(filtered) >= limit:
             return False
 
-        self.requests[bucket_key].append(now)
+        # Enforce hard cap on bucket count (LRU eviction of oldest bucket)
+        if bucket_key not in self.requests and len(self.requests) >= self.max_buckets:
+            self.requests.popitem(last=False)
+
+        filtered.append(now)
+        self.requests[bucket_key] = filtered
+        self.requests.move_to_end(bucket_key)
         return True
 
     def count_recent(self, bucket_key: str) -> int:
         now = time.time()
-        cutoff = now - self.window_seconds
-        timestamps = self.requests[bucket_key]
-        self.requests[bucket_key] = [t for t in timestamps if t > cutoff]
-        return len(self.requests[bucket_key])
+        filtered = self._prune_key(bucket_key, now)
+        return len(filtered)
 
 
 webhook_rate_limiter = SlidingWindowRateLimiter(settings.rate_limit_requests_per_minute)
@@ -55,6 +95,10 @@ def _client_key(request: Request, include_api_key: bool = True) -> str:
         if raw_key:
             key_fp = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:12]
             return f"{client_ip}:{key_fp}"
+        session_cookie = request.cookies.get("hr_session", "")
+        if session_cookie:
+            sess_fp = hashlib.sha256(session_cookie.encode("utf-8")).hexdigest()[:12]
+            return f"{client_ip}:sess:{sess_fp}"
     return client_ip
 
 

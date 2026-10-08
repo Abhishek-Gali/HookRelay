@@ -98,6 +98,7 @@ class DatabaseQueueBroker(BaseQueueBroker):
                 "payload": payload,
                 "destinations": [d.model_dump() for d in destinations],
                 "worker_id": wid,
+                "trigger_type": "redrive" if (leased.attempts and leased.attempts > 0) else "initial",
             }
 
         # Wait briefly for a new enqueue wakeup or poll interval
