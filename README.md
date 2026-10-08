@@ -6,11 +6,56 @@
 [![Tests: 64 Passed](https://img.shields.io/badge/tests-64%20passed-success.svg)](https://github.com/Abhishek-Gali/HookRelay)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **HookRelay** is a security-hardened, production-oriented webhook ingestion and multi-provider delivery gateway (`GitHub ➔ HookRelay ➔ Discord / Slack / Generic HTTP`). Engineered with raw-byte HMAC-SHA256 verification, bounded signed-payload replay detection, SQL-backed durable job queueing with monotonic **fencing tokens** (`worker_id` + `lease_generation` + `locked_until` + `FOR UPDATE SKIP LOCKED`), per-destination partial-failure tracking, unified retry policies respecting `Retry-After`, DNS-validated SSRF-safe routing, automated data retention scrubbing, RBAC-protected management APIs, and an XSS/CSRF-hardened operations console.
+> **"A secure API that receives events from applications and reliably delivers them to communication platforms and other HTTP services."**
+>
+> **HookRelay** is a security-hardened, production-oriented webhook ingestion and multi-provider delivery gateway (`Your App / GitHub ➔ HookRelay ➔ Discord / Slack / Custom HTTP`). Engineered with raw-byte HMAC-SHA256 verification, bounded signed-payload replay detection, SQL-backed durable job queueing with monotonic **fencing tokens** (`worker_id` + `lease_generation` + `locked_until` + `FOR UPDATE SKIP LOCKED`), per-destination partial-failure tracking, unified retry policies respecting `Retry-After`, DNS-validated SSRF-safe routing, automated data retention scrubbing, RBAC-protected management APIs, and an XSS/CSRF-hardened operations console.
 
 ---
 
-## 1. Architecture & Durable Lease Lifecycle
+## 1. What HookRelay Is & How You Can Use It
+
+Instead of writing custom webhook verification, retry loops, rate-limit handling, and error logging inside every script or service you build, **your application or webhook source only needs to send an event to HookRelay once**. HookRelay sits in the middle and handles cryptographic authentication, durable queueing, filtering, retries, and fan-out delivery to all of your configured destinations:
+
+```text
+Your App / Script / GitHub
+            │
+            │  Signed HTTP POST
+            ▼
+      ┌───────────┐
+      │ HookRelay │  (Verifies HMAC, deduplicates, queues durably, retries on failure)
+      └─────┬─────┘
+            │
+   ┌────────┼───────────┬──────────────┐
+   ▼        ▼           ▼              ▼
+Discord   Slack    Custom API     WhatsApp*
+```
+
+```text
+                        ┌──→ Discord 🔵     (Native incoming webhooks + Rich Embeds)
+                        │
+Your App / GitHub ──→ HookRelay ──→ Slack 🟢       (Native incoming webhooks + Block Kit)
+                        │
+                        ├──→ Custom API ⚙️  (Generic HTTPS POST with X-HookRelay-Delivery-ID)
+                        │
+                        └──→ WhatsApp 🟢*   (*Via WhatsApp Business Cloud API / Twilio adapter)
+```
+
+### Supported & Extensible Destinations
+- **Discord (`provider: "discord"`) — ✅ Native Support:** Uses Discord Incoming Webhook URLs and automatically formats events into color-coded Rich Embeds (with `@everyone`/`@here` mention neutralization).
+- **Slack (`provider: "slack"`) — ✅ Native Support:** Uses Slack Incoming Webhook URLs and formats events using Slack Block Kit.
+- **Custom HTTP APIs (`provider: "http"`) — ✅ Native Support:** Forwards structured JSON payloads to any internal or external HTTPS microservice with `X-HookRelay-Event` and `X-HookRelay-Delivery-ID` headers so downstream receivers can process events idempotently.
+- **WhatsApp / SMS / PagerDuty — ⚠️ Extensible via Provider Adapter or Custom API:** Unlike Discord and Slack, WhatsApp does not provide a simple unauthenticated "incoming webhook URL"—it requires calling the **WhatsApp Business Platform / Cloud API** (or a provider like Twilio) with bearer authentication and message templates. HookRelay can deliver to WhatsApp either by pointing a `"http"` route at your messaging bridge or by registering a `WhatsAppProvider` subclass in [`app/providers.py`](app/providers.py).
+
+### Why Put HookRelay in the Middle?
+1. **Talk Once, Fan Out Anywhere:** Your app or GitHub repo sends a single HTTP request to HookRelay; HookRelay routes it to Discord, Slack, and your internal APIs simultaneously based on event type, repository, or branch rules.
+2. **Survives Outages & Rate Limits:** If Discord rate-limits you (`HTTP 429 Retry-After`) or Slack is temporarily down (`HTTP 502/503`), your app isn't blocked. HookRelay queues the event in SQL and retries with exponential backoff and jitter.
+3. **Partial-Failure Safety:** If a message routes to both Discord and Slack, and Discord succeeds while Slack fails, redriving the delivery from the Dead Letter Queue (DLQ) **only retries Slack**—never duplicating messages to Discord.
+4. **Full Auditability & Replay UI:** Inspect every delivery attempt, HTTP status code, and latency in the built-in `/dashboard` console, and replay failed events with one click.
+
+---
+
+## 2. Technical Architecture & Durable Lease Lifecycle
+
 
 ```
 GitHub Webhook
@@ -47,7 +92,7 @@ GitHub Webhook
 
 ---
 
-## 2. Core Security & Reliability Guarantees
+## 3. Core Security & Reliability Guarantees
 
 ### 🛡️ Security Hardening
 - **Zero Production Default Credentials & Private-Target Guard (`app/config.py`)**: Startup validation rejects blank, weak (`<32` char), or known placeholder keys (`hr_admin_secret_key_12345`, etc.) and forbids `ALLOW_PRIVATE_DESTINATIONS=true` when `ENVIRONMENT=production`.
@@ -82,7 +127,7 @@ GitHub Webhook
 
 ---
 
-## 3. Threat Model Summary (STRIDE)
+## 4. Threat Model Summary (STRIDE)
 
 Full analysis in [docs/threat-model.md](docs/threat-model.md).
 
@@ -102,7 +147,7 @@ Full analysis in [docs/threat-model.md](docs/threat-model.md).
 
 ---
 
-## 4. Quick Start & Local Development
+## 5. Quick Start & Local Development
 
 ### 1. Clone & Install
 ```bash
@@ -132,7 +177,7 @@ python -m pytest tests/ -v
 
 ---
 
-## 5. API & Probe Reference
+## 6. API & Probe Reference
 
 | Method | Endpoint | Auth / Role | Description |
 |---|---|---|---|
@@ -153,7 +198,8 @@ python -m pytest tests/ -v
 
 ---
 
-## 6. License
+## 7. License
 
 MIT License. Designed and maintained by [Abhishek Gali](https://github.com/Abhishek-Gali).
+
 
