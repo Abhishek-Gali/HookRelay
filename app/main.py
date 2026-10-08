@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.config import settings
-from app.security import verify_signature
+from app.security import verify_signature, verify_stripe_signature, verify_secret_token
 from app.store import store, IllegalStateTransitionError
 from app.models import DeliveryDTO, AuditLogDTO
 from app.auth import (
@@ -281,6 +281,122 @@ async def github_webhook(request: Request):
     WEBHOOK_REQUESTS_TOTAL.labels(event=event_type, outcome="accepted").inc()
     WEBHOOK_RESPONSE_SECONDS.observe(time.perf_counter() - start_time)
     return {"accepted": True, "delivery_id": delivery_id}
+
+
+@app.post("/webhook/{source}", status_code=status.HTTP_200_OK, dependencies=[Depends(check_rate_limit)])
+async def multi_source_webhook(source: str, request: Request):
+    """
+    Universal multi-provider webhook ingestion endpoint supporting:
+    - 'stripe' (Stripe-Signature: t=...,v1=...)
+    - 'gitlab' (X-Gitlab-Token or X-Hub-Signature-256)
+    - 'custom' (X-HookRelay-Signature or X-Hub-Signature-256)
+    """
+    start_time = time.perf_counter()
+    _sync_store_bindings()
+
+    normalized_source = source.strip().lower()
+    if normalized_source not in {"stripe", "gitlab", "custom"}:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unsupported webhook source '{source}'. Supported sources: github, gitlab, stripe, custom.",
+        )
+
+    raw_body = await read_bounded_body_stream(request, settings.max_payload_bytes)
+    secret = settings.github_webhook_secret
+
+    # Verify cryptographic signature / secret token based on source protocol
+    if normalized_source == "stripe":
+        stripe_sig = request.headers.get("Stripe-Signature")
+        hub_sig = request.headers.get("X-Hub-Signature-256")
+        verified = verify_stripe_signature(secret, raw_body, stripe_sig) or verify_signature(secret, raw_body, hub_sig)
+    elif normalized_source == "gitlab":
+        gitlab_token = request.headers.get("X-Gitlab-Token")
+        hub_sig = request.headers.get("X-Hub-Signature-256")
+        verified = verify_secret_token(secret, gitlab_token) or verify_signature(secret, raw_body, hub_sig)
+    else:
+        custom_sig = request.headers.get("X-HookRelay-Signature") or request.headers.get("X-Hub-Signature-256")
+        verified = verify_signature(secret, raw_body, custom_sig)
+
+    if not verified:
+        WEBHOOK_REQUESTS_TOTAL.labels(event=f"{normalized_source}:unknown", outcome="rejected_signature").inc()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid or missing webhook signature for source '{normalized_source}'.",
+        )
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Malformed JSON body.")
+
+    # Extract canonical delivery_id, event_type, and project/repo identifier
+    if normalized_source == "stripe":
+        delivery_id = request.headers.get("X-Stripe-Delivery") or str(payload.get("id", ""))
+        raw_event = str(payload.get("type", "payment_intent.succeeded"))
+        event_type = raw_event if raw_event.startswith("stripe.") else f"stripe.{raw_event}"
+        repo_name = str(payload.get("account") or "stripe/billing")
+    elif normalized_source == "gitlab":
+        delivery_id = (
+            request.headers.get("X-Gitlab-Event-UUID")
+            or request.headers.get("X-GitHub-Delivery")
+            or str(payload.get("checkout_sha", ""))
+        )
+        raw_event = request.headers.get("X-Gitlab-Event", "Push Hook").lower().replace(" hook", "").replace(" ", "_")
+        event_type = raw_event
+        repo_name = payload.get("project", {}).get("path_with_namespace") or payload.get("repository", {}).get("name")
+    else:
+        delivery_id = (
+            request.headers.get("X-HookRelay-Delivery-ID")
+            or request.headers.get("X-GitHub-Delivery")
+            or str(payload.get("id", ""))
+        )
+        event_type = (
+            request.headers.get("X-HookRelay-Event")
+            or request.headers.get("X-GitHub-Event")
+            or str(payload.get("event", "custom.event"))
+        )
+        repo_name = payload.get("service") or payload.get("repository", {}).get("full_name") or "custom/app"
+
+    if not delivery_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Missing delivery ID header or payload 'id' for source '{normalized_source}'.",
+        )
+
+    destinations = routing_engine.resolve_destinations(
+        event_type=event_type,
+        payload=payload,
+        default_url=settings.discord_webhook_url,
+    )
+    destinations_list = [d.model_dump() for d in destinations]
+
+    is_claimed = await store.claim_delivery(
+        delivery_id=delivery_id,
+        event_type=event_type,
+        repo=repo_name,
+        payload=payload,
+        destinations=destinations_list,
+        raw_body=raw_body,
+        replay_window_seconds=settings.replay_window_seconds,
+    )
+
+    if not is_claimed:
+        WEBHOOK_REQUESTS_TOTAL.labels(event=event_type, outcome="duplicate").inc()
+        WEBHOOK_RESPONSE_SECONDS.observe(time.perf_counter() - start_time)
+        return {"duplicate": True, "delivery_id": delivery_id, "source": normalized_source}
+
+    job_data = {
+        "delivery_id": delivery_id,
+        "event_type": event_type,
+        "payload": payload,
+        "destinations": destinations_list,
+    }
+    await queue_broker.enqueue(job_data)
+
+    WEBHOOK_REQUESTS_TOTAL.labels(event=event_type, outcome="accepted").inc()
+    WEBHOOK_RESPONSE_SECONDS.observe(time.perf_counter() - start_time)
+    return {"accepted": True, "delivery_id": delivery_id, "source": normalized_source}
+
 
 
 # =====================================================================

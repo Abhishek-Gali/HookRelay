@@ -1,66 +1,156 @@
-# HookRelay: Hardened Webhook Delivery Infrastructure & Event Gateway
+# HookRelay — Reliable Webhook Delivery Infrastructure You Can Self-Host
 
 <p align="center">
-  <img src="docs/assets/social-preview.png" alt="HookRelay — Hardened Webhook Ingestion & Multi-Destination Delivery Gateway" width="100%" />
+  <img src="docs/assets/social-preview.png" alt="HookRelay — Self-Hosted Webhook Ingestion & Multi-Destination Delivery Infrastructure" width="100%" />
 </p>
 
-[![CI & DevSecOps](https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.135+-009688.svg)](https://fastapi.tiangolo.com)
-[![Tests: 65 Passed](https://img.shields.io/badge/tests-65%20passed-success.svg)](https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml)
-[![Type Checked: mypy](https://img.shields.io/badge/type_checked-mypy-2A6DB2.svg)](https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml)
-[![Security: Bandit & Gitleaks](https://img.shields.io/badge/security-Bandit_%7C_Gitleaks_%7C_pip--audit-brightgreen.svg)](https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<p align="center">
+  <a href="https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml"><img src="https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml/badge.svg" alt="CI & DevSecOps" /></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+" /></a>
+  <a href="https://fastapi.tiangolo.com"><img src="https://img.shields.io/badge/FastAPI-0.135+-009688.svg" alt="FastAPI" /></a>
+  <a href="https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/tests-67%20passed-success.svg" alt="Tests: 67 Passed" /></a>
+  <a href="https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/type_checked-mypy-2A6DB2.svg" alt="Type Checked: mypy" /></a>
+  <a href="https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml"><img src="https://img.shields.io/badge/security-Bandit_%7C_Gitleaks_%7C_pip--audit-brightgreen.svg" alt="Security" /></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+</p>
 
-
-> **"A secure API that receives events from applications and reliably delivers them to communication platforms and other HTTP services."**
+> **HookRelay — Reliable webhook delivery with retries, idempotency, monotonic fencing tokens & crash recovery.**
 >
-> **HookRelay** is a security-hardened, production-oriented webhook ingestion and multi-provider delivery gateway (`Your App / GitHub ➔ HookRelay ➔ Discord / Slack / Custom HTTP`). Engineered with raw-byte HMAC-SHA256 verification, bounded signed-payload replay detection, SQL-backed durable job queueing with monotonic **fencing tokens** (`worker_id` + `lease_generation` + `locked_until` + `FOR UPDATE SKIP LOCKED`), per-destination partial-failure tracking, unified retry policies respecting `Retry-After`, DNS-validated SSRF-safe routing, automated data retention scrubbing, RBAC-protected management APIs, and an XSS/CSRF-hardened operations console.
-
----
-
-## 1. What HookRelay Is & How You Can Use It
-
-Instead of writing custom webhook verification, retry loops, rate-limit handling, and error logging inside every script or service you build, **your application or webhook source only needs to send an event to HookRelay once**. HookRelay sits in the middle and handles cryptographic authentication, durable queueing, filtering, retries, and fan-out delivery to all of your configured destinations:
+> Instead of rebuilding HMAC verification, retry loops, rate-limit handling, and dead-letter queues inside every service, **your application or webhook provider talks to HookRelay once**. HookRelay verifies signatures, persists events durably in SQL (`PostgreSQL` or `SQLite`), coordinates distributed workers via monotonic fencing tokens, and guarantees delivery to **Discord, Slack, and custom HTTP microservices**.
 
 ```text
-                         ┌──→ Discord 🔵     (Native incoming webhooks + Rich Embeds)
-                         │
-Your App / GitHub ──→ HookRelay ──→ Slack 🟢       (Native incoming webhooks + Block Kit)
-                         │
-                         ├──→ Custom API ⚙️  (Generic HTTPS POST with X-HookRelay-Delivery-ID)
-                         │
-                         └──→ WhatsApp 🟢*   (*Via WhatsApp Business Cloud API / Twilio adapter)
+                 ┌──► Discord 🔵      (Native incoming webhooks + Rich Embeds)
+GitHub ──┐       ├──► Slack 🟢        (Native incoming webhooks + Block Kit)
+GitLab ──┼─► HookRelay ──► Custom HTTP ⚙️  (HTTPS POST + X-HookRelay-Delivery-ID idempotency)
+Stripe ──┤       └──► WhatsApp / Email / PagerDuty* (*Via HTTP bridge or Provider plugin)
+Custom ──┘
 ```
-
-### Supported & Extensible Destinations
-- **Discord (`provider: "discord"`) — ✅ Native Support:** Uses Discord Incoming Webhook URLs and automatically formats events into color-coded Rich Embeds (with `@everyone`/`@here` mention neutralization).
-- **Slack (`provider: "slack"`) — ✅ Native Support:** Uses Slack Incoming Webhook URLs and formats events using Slack Block Kit.
-- **Custom HTTP APIs (`provider: "http"`) — ✅ Native Support:** Forwards structured JSON payloads to any internal or external HTTPS microservice with `X-HookRelay-Event` and `X-HookRelay-Delivery-ID` headers so downstream receivers can process events idempotently.
-- **WhatsApp / SMS / PagerDuty — ⚠️ Extensible via Provider Adapter or Custom API:** Unlike Discord and Slack, WhatsApp does not provide a simple unauthenticated "incoming webhook URL"—it requires calling the **WhatsApp Business Platform / Cloud API** (or a provider like Twilio) with bearer authentication and message templates. HookRelay can deliver to WhatsApp either by pointing a `"http"` route at your messaging bridge or by registering a `WhatsAppProvider` subclass in [`app/providers.py`](app/providers.py).
-
-### Why Put HookRelay in the Middle?
-1. **Talk Once, Fan Out Anywhere:** Your app or GitHub repo sends a single HTTP request to HookRelay; HookRelay routes it to Discord, Slack, and your internal APIs simultaneously based on event type, repository, or branch rules.
-2. **Survives Outages & Rate Limits:** If Discord rate-limits you (`HTTP 429 Retry-After`) or Slack is temporarily down (`HTTP 502/503`), your app isn't blocked. HookRelay queues the event in SQL and retries with exponential backoff and jitter.
-3. **Partial-Failure Safety:** If a message routes to both Discord and Slack, and Discord succeeds while Slack fails, redriving the delivery from the Dead Letter Queue (DLQ) **only retries Slack**—never duplicating messages to Discord.
-4. **Full Auditability & Replay UI:** Inspect every delivery attempt, HTTP status code, and latency in the built-in `/dashboard` console, and replay failed events with one click.
 
 ---
 
-## 2. System Architecture & Fencing-Token Lease Lifecycle
+## ⚡ 1. See It Survive Outages & Worker Crashes (Live Demo)
 
-### 2.1 End-to-End Ingestion, Durable Queueing & Egress Architecture
+What happens when your downstream API or Discord webhook goes down mid-deployment, or a worker process crashes while holding a job lease?
+
+```text
+GitHub / Stripe / App                Downstream Outage & Automatic Recovery
+         │                                     │
+         ▼                                     ├─► Attempt 1: Discord DOWN ❌ (HTTP 503)
+    ┌───────────┐                              │      └──► Exponential Backoff + Jitter
+    │ HookRelay │                              ├─► Attempt 2: Rate Limited ⚠️ (HTTP 429 Retry-After: 0.1s)
+    └─────┬─────┘                              │      └──► Honors exact Retry-After header
+          ▼                                    └─► Attempt 3: Discord UP   ✅ (HTTP 204 Delivered!)
+   ┌─────────────┐
+   │ PostgreSQL  │                   Worker Crash & Split-Brain Fencing Protection
+   └──────┬──────┘                             │
+          ▼                                    ├─► Worker A claims job (lease_generation = 1) & crashes 💥
+   ┌─────────────┐                             ├─► Lease expires -> Worker B reclaims (lease_generation = 2) ✅
+   │ Worker Pool │─────────────────────────────┴─► Zombie Worker A wakes up (gen=1 != gen=2) -> BLOCKED 🛡️
+   └─────────────┘
+```
+
+Run the self-contained chaos & recovery demonstration in **under 5 seconds** (`zero external dependencies required`):
+
+```bash
+python -m scripts.demo_chaos_recovery
+```
+
+<details open>
+<summary><b>📺 View Actual Terminal Output from <code>python -m scripts.demo_chaos_recovery</code></b></summary>
+
+```text
+==============================================================================
+  SCENARIO 1: DOWNSTREAM OUTAGE (503) -> RATE LIMIT (429) -> RECOVERY (204)
+==============================================================================
+  [1] GitHub sends signed 'push' webhook (274 bytes, sig=sha256=e67e7f57f75d0d7...)
+  [2] HookRelay verified HMAC & persisted job in SQL: delivery_id='deliv-outage-recovery-001' (claimed=True)
+  [3] Worker 'worker-primary-01' claims lease (gen=1) & starts delivery with automatic retries:
+      ├──► Attempt 1 -> Discord DOWN ❌ (HTTP 503 Service Unavailable)
+      ├──► Attempt 2 -> Discord RATE LIMITED ⚠️ (HTTP 429 Retry-After: 0.1s)
+      └──► Attempt 3 -> Discord UP ✅ (HTTP 204 No Content - Rich Embed Delivered!)
+  [4] Final SQL Delivery Status: status='sent' | attempts=3 | total_time=621.6ms
+      • Attempt #1: outcome='failed' | http_status=503 | latency=0.45ms | error=Service Unavailable: upstream outage
+      • Attempt #2: outcome='failed' | http_status=429 | latency=0.30ms | error=Too Many Requests
+      • Attempt #3: outcome='sent'   | http_status=204 | latency=0.21ms | error=None
+
+==============================================================================
+  SCENARIO 2: WORKER CRASH MID-FLIGHT & FENCING TOKEN SPLIT-BRAIN PROTECTION
+==============================================================================
+  [1] Worker A ('worker-A-stalled') claims 'deliv-worker-crash-002' -> lease_generation=1
+  [2] Worker A suffers a network hang / GC pause 💥 (Lease expires!)
+  [3] Worker B ('worker-B-rescuer') reclaims expired job -> lease_generation=2 (incremented!)
+  [4] Worker B delivers webhook & commits status='sent' with fencing token (lease_generation=2) ✅
+  [5] Zombie Worker A wakes up and attempts to overwrite SQL state with stale lease_generation=1...
+      └──► BLOCKED BY DATABASE FENCING GUARD 🛡️: Fenced out: worker 'worker-A-stalled' (gen=1) no longer owns delivery 'deliv-worker-crash-002' (owner='None', gen=2, status='sent').
+  [6] Verified Final SQL State remains intact: status='sent', lease_generation=2
+
+==============================================================================
+  ALL CHAOS & RECOVERY CHECKS PASSED (0 lost webhooks, 0 duplicate deliveries)
+==============================================================================
+```
+</details>
+
+---
+
+## 🚀 2. 60-Second Quickstart & Example Webhook
+
+### Option A: Production Multi-Container Stack (`Docker Compose`)
+Launches **HookRelay API Gateway**, **4-Worker Distributed Consumer Pool**, **PostgreSQL 16**, and **Redis 7**:
+
+```bash
+git clone https://github.com/Abhishek-Gali/HookRelay.git
+cd HookRelay
+cp .env.example .env
+POSTGRES_PASSWORD=$(python -c "import secrets; print(secrets.token_urlsafe(24))") docker compose up --build -d
+```
+
+### Option B: Zero-Dependency Local Run (`SQLite` + Embedded Worker)
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+### Send a Signed Webhook & Inspect It in the Operations Console
+Once running, send a signed test event (GitHub, Stripe, GitLab, or Custom) and open **`http://127.0.0.1:8000/dashboard`**:
+
+```bash
+python -c '
+import hmac, hashlib, json, urllib.request
+secret = "dev_webhook_secret_replace_in_prod"
+body = json.dumps({
+    "ref": "refs/heads/main",
+    "repository": {"full_name": "Abhishek-Gali/HookRelay", "html_url": "https://github.com/Abhishek-Gali/HookRelay"},
+    "pusher": {"name": "Abhishek-Gali"},
+    "commits": [{"id": "4915e85", "message": "feat: verify resilient webhook delivery"}]
+}).encode()
+sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+req = urllib.request.Request(
+    "http://127.0.0.1:8000/webhook/github",
+    data=body,
+    headers={"Content-Type": "application/json", "X-GitHub-Event": "push", "X-GitHub-Delivery": "demo-001", "X-Hub-Signature-256": sig}
+)
+print(urllib.request.urlopen(req).read().decode())
+'
+```
+- **Response:** `{"accepted": true, "delivery_id": "demo-001"}`
+- **Operations Console:** Open **`http://127.0.0.1:8000/dashboard`** to inspect real-time delivery status, per-attempt HTTP latency, Dead Letter Queue (DLQ) redrives, and security audit logs.
+
+---
+
+## 🏗️ 3. System Architecture & Fencing-Token Lease Lifecycle
+
+### 3.1 End-to-End Ingestion, Durable Queueing & Egress Architecture
 
 ```mermaid
 flowchart TD
-    subgraph Producers["Upstream Event Producers"]
-        GH["GitHub / CI / App Webhooks<br/>(Signed HTTP POST)"]
+    subgraph Producers["Upstream Event Sources"]
+        GH["GitHub / GitLab / Stripe / Custom App<br/>(Signed HTTP POST)"]
         OP["SRE / Operator Console<br/>(/dashboard + CSRF)"]
     end
 
     subgraph Gateway["FastAPI Ingestion & Control Plane (Stateless Replicas)"]
         RL["Distributed Rate Limiter<br/>(Redis Lua / Bounded LRU)"]
-        HMAC["Raw-Byte HMAC-SHA256<br/>(hmac.compare_digest + 5MB Stream Cap)"]
+        HMAC["Raw-Byte Signature Verifier<br/>(GitHub HMAC / Stripe v1 / GitLab Token)"]
         REPLAY["Replay Fingerprint Guard<br/>(delivery_id + sha256(body) Window)"]
         ROUTE["Routing Engine<br/>(Event/Repo/Branch Rules)"]
         RBAC["Dual Auth & RBAC<br/>(ADMIN / OPERATOR / VIEWER)"]
@@ -98,7 +188,7 @@ flowchart TD
     DISPATCH -- "Fenced State Update (WHERE worker_id & lease_generation)" --> DB
 ```
 
-### 2.2 Split-Brain Prevention via Monotonic Fencing Tokens (`HR-02` / `HR-03`)
+### 3.2 Split-Brain Prevention via Monotonic Fencing Tokens (`HR-02` / `HR-03`)
 
 ```mermaid
 sequenceDiagram
@@ -115,34 +205,36 @@ sequenceDiagram
     DB-->>W2: Reclaimed! (worker_id="W2", lease_generation=2, locked_until=T+121s)
     W2->>Dest: POST webhook (X-HookRelay-Delivery-ID: deliv-1)
     Dest-->>W2: 200 OK
-    W2->>DB: mark_sent(worker_id="W2", expected_lease_generation=2)
+    W2->>DB: mark_sent(worker_id="W2", lease_generation=2)
     DB-->>W2: COMMIT (status="sent", lease_generation=2)
     Note over W1: Worker A wakes up at T+65s and attempts pre-flight / commit
-    W1->>DB: verify_lease_ownership(worker_id="W1", expected_lease_generation=1)
+    W1->>DB: mark_failed_or_dlq(worker_id="W1", lease_generation=1)
     DB-->>W1: 0 rows matched (Current generation is 2 != 1)
     Note over W1: Raises StaleWorkerLeaseError — Aborts without corrupting state!
 ```
 
 ---
 
-## 3. Delivery Guarantees: `At-Least-Once` vs. `Effectively-Once`
+## 🧠 4. Key Engineering & Architecture Decisions
 
-Webhook gateways operate across network boundaries where downstream HTTP endpoints (Discord, Slack, third-party APIs) do not participate in two-phase commit (`2PC`) transactions with the gateway's database. Because a worker process could theoretically crash in the millisecond *after* the downstream HTTP server receives the TCP response bytes but *before* the database `COMMIT` marking `status = 'sent'` completes, **true mathematical "exactly-once" delivery across arbitrary external HTTP servers is impossible without downstream cooperation**.
+### 4.1 Why SQL (`FOR UPDATE SKIP LOCKED`) Instead of Kafka or RabbitMQ?
+For a self-hosted webhook gateway, requiring teams to operate a separate JVM/Erlang message broker alongside their database doubles operational complexity and introduces **dual-write consistency bugs** (where a record commits to SQL but fails to publish to the broker, or vice versa).
+- By storing both the delivery state machine and the job queue in the same ACID table (`deliveries`), **ingestion and queueing happen in a single atomic SQL transaction** (`INSERT ... ON CONFLICT DO NOTHING`).
+- With PostgreSQL `FOR UPDATE SKIP LOCKED` and monotonic `lease_generation` fencing tokens, HookRelay gets durable, transactional job queueing with zero extra infrastructure.
 
-Instead, HookRelay implements **End-to-End At-Least-Once Delivery** paired with **Three-Layer Idempotency & Fencing Controls** to achieve **Effectively-Once Execution**:
+### 4.2 Delivery Guarantees: `At-Least-Once` vs. `Effectively-Once`
+Webhook gateways operate across network boundaries where external HTTP servers (Discord, Slack, third-party APIs) do not participate in two-phase commit (`2PC`) transactions with the gateway's database. If a worker crashes in the millisecond *after* the downstream HTTP server receives the TCP bytes but *before* the SQL `COMMIT` marking `status = 'sent'`, **true mathematical "exactly-once" delivery across arbitrary external HTTP servers is impossible without downstream cooperation**.
+
+Instead, HookRelay implements **End-to-End At-Least-Once Delivery** paired with **Four-Layer Idempotency & Fencing Controls** to achieve **Effectively-Once Execution**:
 
 | Pipeline Stage | Guarantee | Mechanism Implemented in HookRelay |
 |---|---|---|
-| **1. Webhook Ingress** | **Exactly-Once Ingestion** | • **Primary Key Deduplication:** `INSERT INTO deliveries ... ON CONFLICT (delivery_id) DO NOTHING` atomically rejects duplicate `X-GitHub-Delivery` UUIDs even under 100+ concurrent requests.<br>• **Signed-Payload Replay Guard (`HR-04`):** Indexes `payload_hash = sha256(raw_body)` + `event_type` within `REPLAY_WINDOW_SECONDS` (300s) so an attacker or buggy sender cannot replay an identical signed body under a freshly generated `X-GitHub-Delivery` UUID. |
-| **2. Queue Lease & Worker Coordination** | **Mutual Exclusion + Fenced State Commits** | • **Atomic Row Claim:** Workers claim due jobs via `FOR UPDATE SKIP LOCKED` (PostgreSQL) or serialized `RETURNING` updates (SQLite).<br>• **Monotonic Fencing Tokens (`HR-02`/`HR-03`):** Every claim increments `lease_generation`. Workers verify `(worker_id, lease_generation)` before every HTTP attempt and inside the `WHERE` clause of `mark_sent` / `mark_retry_wait` / `mark_failed_or_dlq`. A zombie worker whose lease expired cannot overwrite state. |
+| **1. Webhook Ingress** | **Exactly-Once Ingestion** | • **Primary Key Deduplication:** `INSERT INTO deliveries ... ON CONFLICT (delivery_id) DO NOTHING` atomically rejects duplicate delivery IDs even under 200+ concurrent requests.<br>• **Signed-Payload Replay Guard (`HR-04`):** Indexes `payload_hash = sha256(raw_body)` + `event_type` within `REPLAY_WINDOW_SECONDS` (300s) so an attacker cannot replay an identical signed body under a mutated `X-GitHub-Delivery` UUID. |
+| **2. Queue Lease & Worker Coordination** | **Mutual Exclusion + Fenced State Commits** | • **Atomic Row Claim:** Workers claim due jobs via `FOR UPDATE SKIP LOCKED` (PostgreSQL) or serialized `RETURNING` updates (SQLite).<br>• **Monotonic Fencing Tokens (`HR-02`/`HR-03`):** Every claim increments `lease_generation`. Workers verify `(worker_id, lease_generation)` before every HTTP attempt and inside the `WHERE` clause of `mark_sent` / `mark_retry_wait` / `mark_failed_or_dlq`. |
 | **3. Multi-Destination Fan-Out** | **Per-Target Idempotency (`only_unsent=True`)** | • **Granular Target Checkpoint (`HR-06`):** Each destination inside `deliveries.destinations` tracks its own state (`pending` ➔ `sent` / `failed`) immediately after each HTTP call.<br>• If Destination 1 (Discord) succeeds (`204`) and Destination 2 (Slack) fails (`503`), subsequent retries and manual DLQ redrives **skip Destination 1** and only retry Destination 2. |
-| **4. Downstream Egress (`provider: "http"`)** | **Idempotent Consumer Contract** | • Every outbound HTTP request includes deterministic headers:<br>  `X-HookRelay-Delivery-ID: <delivery_id>`<br>  `X-HookRelay-Event: <event_type>`<br>• Downstream microservices can deduplicate on `X-HookRelay-Delivery-ID` (e.g., `SETNX` in Redis or a unique SQL constraint) to achieve **end-to-end effectively-once processing**. |
+| **4. Downstream Egress (`provider: "http"`)** | **Idempotent Consumer Contract** | • Every outbound HTTP request includes deterministic headers (`X-HookRelay-Delivery-ID: <delivery_id>`, `X-HookRelay-Event: <event_type>`) so downstream microservices can deduplicate on `X-HookRelay-Delivery-ID`. |
 
----
-
-## 4. Single-Instance (`SQLite`) vs. Distributed Multi-Worker (`PostgreSQL` + `Redis`)
-
-HookRelay is intentionally engineered to run with **zero external dependencies (`SQLite` + in-memory LRU)** for local development and single-node edge deployments, while scaling horizontally to **multi-container API + Worker pools (`PostgreSQL` + `Redis`)** in production without code changes:
+### 4.3 Single-Instance (`SQLite`) vs. Distributed Multi-Worker (`PostgreSQL` + `Redis`)
 
 | Architectural Dimension | Single-Node Mode (`SQLite` Default) | Distributed Multi-Instance Mode (`PostgreSQL` + `Redis`) |
 |---|---|---|
@@ -152,24 +244,11 @@ HookRelay is intentionally engineered to run with **zero external dependencies (
 | **Rate Limiting** | Bounded-memory `OrderedDict` LRU sliding window (`max_buckets=10,000`) per process. | Shared atomic Redis Lua sliding window (`REDIS_URL=redis://...`) enforcing global rate limits across all API replicas. |
 | **Worker Topology** | Embedded background worker + reconciler run inside the FastAPI `lifespan` process. | Standalone worker fleet (`python -m app.worker --concurrency 4`) scales independently from stateless API containers (`ENABLE_EMBEDDED_WORKER=false`). |
 
-### Running Standalone Distributed Workers (`app/worker.py`)
-You can scale background queue consumption independently of the HTTP ingestion tier using the dedicated worker entrypoint:
-
-```bash
-# Start 4 concurrent queue-consumer loops + reconciliation daemon in a dedicated worker container/process:
-python -m app.worker --concurrency 4
-```
-
-Or launch the full multi-container topology (`hookrelay` API + `hookrelay-worker` replicas + `postgres:16-alpine` + `redis:7-alpine`) via Docker Compose:
-```bash
-POSTGRES_PASSWORD=$(python -c "import secrets; print(secrets.token_urlsafe(24))") docker compose up --build -d
-```
-
 ---
 
-## 5. Load & Concurrency Benchmark Results (`1,000` & `10,000` Webhooks)
+## 📊 5. Load & Concurrency Benchmark Results (`1,000` & `10,000` Webhooks)
 
-Measured using the included [`scripts/benchmark_load.py`](scripts/benchmark_load.py) load harness (`python -m scripts.benchmark_load`) on a single machine (Python 3.13, Windows, SQLite WAL mode with full raw-byte HMAC-SHA256 verification, replay fingerprint lookup, and atomic SQL queue persistence enabled):
+Measured using the included [`scripts/benchmark_load.py`](scripts/benchmark_load.py) load harness (`python -m scripts.benchmark_load`) on a single machine (Python 3.13, SQLite WAL mode with full raw-byte HMAC-SHA256 verification, replay fingerprint lookup, and atomic SQL queue persistence enabled):
 
 | Benchmark Tier | Total Events | Concurrency | Accepted / Dispatched | Errors / Duplicates | Throughput | Mean Latency | p50 Latency | p95 Latency | p99 Latency |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -177,59 +256,20 @@ Measured using the included [`scripts/benchmark_load.py`](scripts/benchmark_load
 | **Tier 2: 10,000 Signed Webhooks Ingestion** *(Sustained SQLite write-lock stress)* | `10,000` | `200` clients | `10,000 / 10,000` | `0` (`0.0%`) | **`240.8 req/sec`** | `821.03 ms` | `831.69 ms` | `1,095.33 ms` | `1,143.83 ms` |
 | **Tier 3: 4-Worker Distributed Queue Drain** (`bench-worker-0..3`) | `1,000` jobs | `4` workers | `1,000 / 1,000` (`[250, 250, 250, 250]`) | `0` duplicates | **`38.2 jobs/sec`** *(SQLite lock serialized)* | — | — | — | — |
 
-> **Reproduce these benchmarks locally:**
-> ```bash
-> # Run 1,000 and 10,000 webhook ingestion + 4-worker distributed drain benchmark:
-> python -m scripts.benchmark_load --tiers 1000 10000 --workers 4
->
-> # Or include the 50,000-event endurance tier:
-> python -m scripts.benchmark_load --tiers 1000 10000 50000 --workers 8
-> ```
+```bash
+# Reproduce the 1,000 and 10,000 webhook load test locally:
+python -m scripts.benchmark_load --tiers 1000 10000 --workers 4
+```
 
 ---
 
-## 6. Core Security & Reliability Controls
-
-### 🛡️ Security Hardening
-- **Zero Production Default Credentials & Private-Target Guard (`app/config.py`)**: Startup validation rejects blank, weak (`<32` char), or known placeholder keys (`hr_admin_secret_key_12345`, etc.) and forbids `ALLOW_PRIVATE_DESTINATIONS=true` when `ENVIRONMENT=production`.
-- **Timing-Safe Raw-Byte HMAC-SHA256 & Signed-Payload Replay Protection (`app/security.py`, `app/store.py`)**:
-  - Computes HMAC-SHA256 strictly over raw request stream bytes before JSON parsing and compares via `hmac.compare_digest`.
-  - Mitigates `X-GitHub-Delivery` header mutation replays (`HR-04`) by indexing `payload_hash = sha256(raw_body)` + `event_type` within a configurable `REPLAY_WINDOW_SECONDS` (default 300s).
-- **Streaming Payload DoS Protection (`read_bounded_body_stream` in `app/main.py`)**: Enforces the 5 MB limit chunk-by-chunk on the incoming stream before buffering into memory, returning HTTP 413 immediately on oversized chunked transfers.
-- **Dual Authentication (API Key + `HttpOnly` Session Cookie with CSRF), RBAC & Distributed Rate Limiting (`app/auth.py`, `app/ratelimit.py`)**:
-  - Programmatic API clients authenticate via `X-API-Key` verified against SHA-256 hashes in constant time.
-  - Browser console operators exchange their key at `POST /api/auth/login` for an `HttpOnly; SameSite=Strict` session cookie (`hr_session`) and must supply `X-CSRF-Token` on all state-changing requests (including `POST /api/auth/logout`).
-  - Role hierarchy: `ADMIN` (full control + DLQ discard + audit logs), `OPERATOR` (read + redrive), `VIEWER` (read-only).
-  - Supports multi-replica distributed sliding-window rate limiting via atomic Redis Lua scripts (`REDIS_URL`), with bounded-memory `OrderedDict` LRU fallback (`max_buckets=10,000`).
-- **Connect-Time DNS-Rebinding & Redirect SSRF Protection (`app/routing.py`, `app/providers.py`)**: Blocks non-HTTPS schemes, `localhost`, loopback (`127.0.0.0/8`, `::1`), RFC1918 private networks (`10/8`, `172.16/12`, `192.168/16`), cloud metadata endpoints (`169.254.169.254`), resolves and pins DNS `A`/`AAAA` records (including IPv4-mapped and NAT64 prefixes) with TLS `sni_hostname` before outbound dispatch, and enforces `follow_redirects=False`.
-- **Stored-XSS & Strict CSP without `'unsafe-inline'` (`app/ui/dashboard.html`, `app/ui/dashboard.js`, `app/main.py`)**:
-  - Operations console renders all untrusted webhook and downstream error data exclusively via `document.createElement()` and `.textContent` (zero `innerHTML` interpolation).
-  - Serves `/static/dashboard.js` and `/static/dashboard.css` from in-memory cached `Response` objects (eliminating `FileResponse` Range-header exposure, `CVE-2025-62727`) with `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'` and `X-XSS-Protection: 0`.
-- **Credential-Safe Error Categorization (`format_safe_exception`, `sanitize_error_message` in `app/providers.py`)**: Redacts Discord/Slack tokens, URL userinfo, and query strings from downstream errors, omits raw error bodies on `GenericHttpProvider`, and categorizes exceptions into structured JSON without leaking internal stack traces.
-
-### ⚙️ Distributed Systems & Queue Reliability
-- **SQL-Backed Durable Job Queue (`DatabaseQueueBroker` in `app/queue_broker.py`)**:
-  - Jobs are persisted in the SQL `deliveries` table at ingestion time—surviving process crashes and container restarts without data loss.
-- **Monotonic Fencing Tokens + Ownership-Conditional State Transitions (`acquire_lease`, `_transition_state` in `app/store.py`)**:
-  - Every lease acquisition increments a monotonic `lease_generation` counter (`HR-02`, `HR-03`).
-  - Workers verify `(worker_id, lease_generation)` before each outbound HTTP attempt and in the `WHERE` clause of `mark_sent`, `mark_failed_or_dlq`, and `mark_retry_wait`. A slow worker whose lease expired and was reclaimed by another worker immediately raises `StaleWorkerLeaseError` and cannot overwrite state.
-- **Per-Destination Partial-Failure Tracking (`update_destination_status` in `app/store.py`)**:
-  - Multi-destination deliveries track per-target completion (`"status": "pending" | "sent" | "failed"`) inside `deliveries.destinations` (`HR-06`).
-  - Redrives and crash reconciliations (`only_unsent=True`) automatically skip destinations that already succeeded (`status == "sent"`), preventing duplicate alerts on partial failures.
-- **Automated Data Retention & Payload Scrubbing (`enforce_retention_policy` in `app/store.py`)**:
-  - Background reconciliation automatically scrubs raw webhook `payload = NULL` on terminal deliveries older than `PAYLOAD_RETENTION_DAYS` (14d) while preserving the `delivery_id` row for idempotency (`HR-09`), and prunes `delivery_attempts` (30d) and `audit_logs` (90d).
-- **Unified Retry Policy (`RetryPolicy` in `app/sender.py` & `app/dispatcher.py`)**:
-  - Honors downstream HTTP 429 `Retry-After` headers up to `MAX_RETRY_AFTER_SECONDS` (default 60s) and uses exponential backoff with jitter for 5xx/network errors.
-
----
-
-## 7. Threat Model Summary (STRIDE)
+## 🛡️ 6. Security Hardening & STRIDE Threat Model
 
 Full analysis in [docs/threat-model.md](docs/threat-model.md).
 
 | STRIDE Category | Threat Vector | Technical Control | Verified By |
 |---|---|---|---|
-| **Spoofing** | Forged GitHub webhook | Raw-byte HMAC-SHA256 + `compare_digest` | `tests/test_security.py` |
+| **Spoofing** | Forged GitHub / Stripe / GitLab webhook | Raw-byte HMAC-SHA256 / Stripe `v1` / GitLab token (`compare_digest`) | `tests/test_security.py` |
 | **Spoofing** | Mutated `X-GitHub-Delivery` replay | Bounded `payload_hash` replay window (`HR-04`) | `tests/test_webhook_e2e.py` |
 | **Spoofing** | Default credentials in prod | Startup validator rejects defaults / keys `<32` chars | `tests/test_auth.py` |
 | **Tampering** | Stale worker overwriting state | Monotonic `lease_generation` fencing tokens (`HR-02/03`) | `tests/test_queue_and_leases.py` |
@@ -243,48 +283,12 @@ Full analysis in [docs/threat-model.md](docs/threat-model.md).
 
 ---
 
-## 8. Quick Start & Local Development
-
-### 1. Clone & Install
-```bash
-git clone https://github.com/Abhishek-Gali/HookRelay.git
-cd HookRelay
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 2. Configure Environment
-```bash
-cp .env.example .env
-# Generate strong 32-byte secrets for production:
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-### 3. Run the Server (with Embedded Worker) or Standalone Worker Fleet
-```bash
-# Option A: Single-node API + embedded queue worker
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-# Option B: Multi-worker distributed pool (requires PostgreSQL in production)
-python -m app.worker --concurrency 4
-```
-
-### 4. Run the Verification & DevSecOps Suite
-```bash
-python -m pytest tests/ -v
-python -m ruff check app/ tests/ scripts/
-python -m mypy app/
-python -m bandit -r app/ -ll -ii
-```
-
----
-
-## 9. API & Probe Reference
+## 🔌 7. API & Probe Reference
 
 | Method | Endpoint | Auth / Role | Description |
 |---|---|---|---|
-| `POST` | `/webhook/github` | GitHub HMAC | Streaming size check, HMAC verify, replay check, atomic claim, durable enqueue |
+| `POST` | `/webhook/github` | GitHub HMAC (`X-Hub-Signature-256`) | Streaming size check, HMAC verify, replay check, atomic claim, durable enqueue |
+| `POST` | `/webhook/{source}` | `stripe` \| `gitlab` \| `custom` | Multi-source webhook ingestion (`Stripe-Signature`, `X-Gitlab-Token`, `X-HookRelay-Signature`) |
 | `GET` | `/dashboard` | Browser (Session Cookie) | XSS/CSRF-hardened operations & DLQ replay console |
 | `POST` | `/api/auth/login` | API Key in body | Exchanges API key for `HttpOnly; SameSite=Strict` session cookie + CSRF token |
 | `POST` | `/api/auth/logout` | `VIEWER`+ & CSRF | Revokes active browser session cookie |
@@ -301,6 +305,18 @@ python -m bandit -r app/ -ll -ii
 
 ---
 
-## 10. License
+## 🗺️ 8. Roadmap & Contributing
+
+- [x] **v2.0:** Durable SQL Queue, Worker Leases, Reconciliation & RBAC Operations Console
+- [x] **v2.1:** Monotonic Fencing Tokens (`lease_generation`), Per-Destination Partial-Failure Recovery, Connect-Time DNS Pinning & Retention Scrubbing
+- [x] **v2.2:** Multi-Source Ingestion (`GitHub`, `GitLab`, `Stripe`, `Custom`), Standalone Distributed Worker Pool (`app.worker`), & 10k Load Benchmark Suite
+- [ ] **v2.3 (Next):** Native **PagerDuty Events v2**, **Telegram Bot API**, **Email (Resend / SMTP)**, and **WhatsApp Cloud API** destination providers
+- [ ] **v2.4:** Per-destination circuit breakers & OpenTelemetry (`OTLP`) distributed trace propagation
+
+Contributions, issue reports, and new provider adapters are welcome! See **[CONTRIBUTING.md](CONTRIBUTING.md)** to get started in under 60 seconds.
+
+---
+
+## 📄 License
 
 MIT License. Designed and maintained by [Abhishek Gali](https://github.com/Abhishek-Gali).

@@ -1,4 +1,9 @@
-from app.security import calculate_signature, verify_signature
+from app.security import (
+    calculate_signature,
+    verify_signature,
+    verify_stripe_signature,
+    verify_secret_token,
+)
 
 
 def test_valid_signature_accepted():
@@ -46,3 +51,29 @@ def test_malformed_header_prefix_rejected():
 
     assert verify_signature(secret, body, raw_hash_only) is False
     assert verify_signature(secret, body, f"sha1={raw_hash_only}") is False
+
+
+def test_stripe_signature_verification_and_timestamp_window():
+    import hashlib
+    import hmac
+
+    secret = "whsec_test_stripe_secret_key"
+    body = b'{"id": "evt_12345", "type": "payment_intent.succeeded"}'
+    ts = 1700000000
+    signed_payload = f"{ts}.".encode("utf-8") + body
+    v1_sig = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+    header = f"t={ts},v1={v1_sig}"
+
+    assert verify_stripe_signature(secret, body, header, tolerance_seconds=300, now_ts=ts + 10) is True
+    # Outside replay tolerance window (>300s)
+    assert verify_stripe_signature(secret, body, header, tolerance_seconds=300, now_ts=ts + 600) is False
+    # Tampered body
+    assert verify_stripe_signature(secret, b'{"id": "evt_999"}', header, tolerance_seconds=300, now_ts=ts) is False
+
+
+def test_gitlab_and_custom_secret_token_verification():
+    secret = "gl_secret_token_98765"
+    assert verify_secret_token(secret, "gl_secret_token_98765") is True
+    assert verify_secret_token(secret, "wrong_token") is False
+    assert verify_secret_token(secret, None) is False
+
