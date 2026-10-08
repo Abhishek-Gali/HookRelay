@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HookRelay • Live Operations Console</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --border-color: #30363d;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent-green: #238636;
+            --accent-purple: #8957e5;
+            --accent-red: #da3633;
+            --accent-blue: #58a6ff;
+            --accent-yellow: #d29922;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        body { background-color: var(--bg-primary); color: var(--text-primary); line-height: 1.5; padding: 24px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+
+        /* Header */
+        header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 18px; margin-bottom: 24px; }
+        .logo { display: flex; align-items: center; gap: 12px; font-size: 22px; font-weight: 700; color: #fff; }
+        .logo i { color: var(--accent-blue); font-size: 26px; }
+        .auth-bar { display: flex; gap: 10px; align-items: center; }
+        input[type="password"] { background: var(--bg-secondary); border: 1px solid var(--border-color); color: #fff; padding: 8px 14px; border-radius: 6px; font-size: 13px; }
+        button { background: var(--accent-green); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; transition: opacity 0.2s; }
+        button:hover { opacity: 0.9; }
+        button.secondary { background: var(--bg-secondary); border: 1px solid var(--border-color); }
+
+        /* Stats Grid */
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 28px; }
+        .stat-card { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 18px; }
+        .stat-title { font-size: 13px; color: var(--text-secondary); text-transform: uppercase; font-weight: 600; margin-bottom: 6px; }
+        .stat-value { font-size: 28px; font-weight: 700; color: #fff; }
+        .stat-badge { font-size: 12px; margin-top: 4px; display: inline-block; padding: 2px 8px; border-radius: 12px; }
+
+        /* Table Card */
+        .card { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; margin-bottom: 24px; }
+        .card-header { padding: 16px 20px; border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; }
+        .card-title { font-size: 16px; font-weight: 600; color: #fff; display: flex; align-items: center; gap: 8px; }
+        table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+        th { background: #1c2128; color: var(--text-secondary); padding: 12px 18px; font-weight: 600; border-bottom: 1px solid var(--border-color); }
+        td { padding: 12px 18px; border-bottom: 1px solid var(--border-color); }
+        tr:hover { background: rgba(255, 255, 255, 0.02); }
+
+        /* Status Badges */
+        .badge { padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+        .badge-sent { background: rgba(35, 134, 54, 0.2); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.3); }
+        .badge-received { background: rgba(88, 166, 255, 0.2); color: #58a6ff; border: 1px solid rgba(88, 166, 255, 0.3); }
+        .badge-dead_letter { background: rgba(218, 54, 51, 0.2); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.3); }
+        .badge-failed { background: rgba(210, 153, 34, 0.2); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.3); }
+
+        /* Action Buttons */
+        .btn-sm { padding: 4px 10px; font-size: 11px; border-radius: 4px; }
+        .btn-replay { background: var(--accent-purple); color: #fff; }
+
+        /* Modal */
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); justify-content: center; align-items: center; z-index: 1000; }
+        .modal-content { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; width: 650px; max-height: 80vh; overflow-y: auto; padding: 24px; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 16px; }
+        .close-btn { color: var(--text-secondary); cursor: pointer; font-size: 20px; }
+        .attempt-item { background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 14px; margin-bottom: 8px; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <i class="fa-solid fa-satellite-dish"></i>
+                <span>HookRelay <small style="font-size: 12px; color: var(--accent-blue); font-weight: normal;">v2.0 Enterprise</small></span>
+            </div>
+            <div class="auth-bar">
+                <input type="password" id="apiKey" placeholder="Admin or Viewer API Key" value="hr_admin_secret_key_12345">
+                <button onclick="refreshData()"><i class="fa-solid fa-arrows-rotate"></i> Refresh</button>
+            </div>
+        </header>
+
+        <!-- Stats Grid -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-title">Total Ingested</div>
+                <div class="stat-value" id="statTotal">-</div>
+                <div class="stat-badge badge-received">Webhooks Accepted</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-title">Success Rate</div>
+                <div class="stat-value" id="statRate">-%</div>
+                <div class="stat-badge badge-sent">Delivery Target 99%+</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-title">Dispatched (Sent)</div>
+                <div class="stat-value" id="statSent" style="color: #3fb950;">-</div>
+                <div class="stat-badge badge-sent">Discord / Slack / HTTP</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-title">Dead Letter Queue (DLQ)</div>
+                <div class="stat-value" id="statDlq" style="color: #f85149;">-</div>
+                <div class="stat-badge badge-dead_letter">Awaiting Replay</div>
+            </div>
+        </div>
+
+        <!-- Deliveries Table -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title"><i class="fa-solid fa-list-check"></i> Recent Deliveries & Ingestion Feed</div>
+                <div>
+                    <button class="secondary btn-sm" onclick="filterStatus('')">All</button>
+                    <button class="secondary btn-sm" onclick="filterStatus('dead_letter')">DLQ Only</button>
+                    <button class="secondary btn-sm" onclick="filterStatus('sent')">Sent Only</button>
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Delivery ID</th>
+                        <th>Event</th>
+                        <th>Repository</th>
+                        <th>Status</th>
+                        <th>Attempts</th>
+                        <th>Last Updated</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="deliveriesBody">
+                    <tr><td colspan="7" style="text-align: center; color: var(--text-secondary); padding: 30px;">Loading deliveries...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Attempt History Modal -->
+    <div class="modal" id="attemptModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle" style="color: #fff; font-size: 16px;">Delivery Attempt History</h3>
+                <span class="close-btn" onclick="closeModal()">&times;</span>
+            </div>
+            <div id="modalBody"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentFilter = '';
+
+        function getHeaders() {
+            const key = document.getElementById('apiKey').value;
+            return { 'X-API-Key': key };
+        }
+
+        async function refreshData() {
+            try {
+                // Fetch stats
+                const statsRes = await fetch('/api/stats', { headers: getHeaders() });
+                if (statsRes.ok) {
+                    const stats = await statsRes.json();
+                    document.getElementById('statTotal').innerText = stats.total_deliveries;
+                    document.getElementById('statSent').innerText = stats.sent_deliveries;
+                    document.getElementById('statDlq').innerText = stats.dlq_deliveries;
+                    document.getElementById('statRate').innerText = stats.success_rate + '%';
+                }
+
+                // Fetch deliveries
+                let url = '/api/deliveries?limit=30';
+                if (currentFilter) url += '&status=' + currentFilter;
+                const delRes = await fetch(url, { headers: getHeaders() });
+                if (delRes.ok) {
+                    const deliveries = await delRes.json();
+                    renderTable(deliveries);
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        function renderTable(items) {
+            const tbody = document.getElementById('deliveriesBody');
+            if (!items.length) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 24px; color: var(--text-secondary);">No deliveries found.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = items.map(d => `
+                <tr>
+                    <td><code>${d.delivery_id.slice(0, 16)}...</code></td>
+                    <td><strong>${d.event_type}</strong></td>
+                    <td>${d.repo || '<em>N/A</em>'}</td>
+                    <td><span class="badge badge-${d.status}">${d.status}</span></td>
+                    <td>${d.attempts}</td>
+                    <td>${new Date(d.updated_at).toLocaleTimeString()}</td>
+                    <td>
+                        <button class="secondary btn-sm" onclick="viewAttempts('${d.delivery_id}')"><i class="fa-solid fa-eye"></i> Details</button>
+                        ${d.status === 'dead_letter' || d.status === 'failed' ? `<button class="btn-replay btn-sm" onclick="replayDelivery('${d.delivery_id}')"><i class="fa-solid fa-rotate-right"></i> Replay</button>` : ''}
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        async function viewAttempts(deliveryId) {
+            const res = await fetch(`/api/deliveries/${deliveryId}`, { headers: getHeaders() });
+            if (res.ok) {
+                const data = await res.json();
+                document.getElementById('modalTitle').innerText = `Attempts: ${deliveryId}`;
+                const body = document.getElementById('modalBody');
+                if (!data.attempt_history || !data.attempt_history.length) {
+                    body.innerHTML = '<p style="color: var(--text-secondary);">No attempts logged yet.</p>';
+                } else {
+                    body.innerHTML = data.attempt_history.map(a => `
+                        <div class="attempt-item">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                                <strong>Attempt #${a.attempt_number} • ${a.destination.toUpperCase()}</strong>
+                                <span style="color: ${a.http_status === 200 || a.http_status === 204 ? '#3fb950' : '#f85149'};">HTTP ${a.http_status || 'ERR'} (${a.response_time_ms}ms)</span>
+                            </div>
+                            <div style="color: var(--text-secondary);">${a.error_message || 'Success'}</div>
+                        </div>
+                    `).join('');
+                }
+                document.getElementById('attemptModal').style.display = 'flex';
+            }
+        }
+
+        async function replayDelivery(deliveryId) {
+            if (!confirm(`Replay delivery ${deliveryId}?`)) return;
+            const res = await fetch(`/api/deliveries/${deliveryId}/redrive`, {
+                method: 'POST',
+                headers: getHeaders()
+            });
+            if (res.ok) {
+                alert('Delivery re-queued successfully.');
+                refreshData();
+            } else {
+                alert('Replay failed. Check your API key permissions.');
+            }
+        }
+
+        function filterStatus(status) {
+            currentFilter = status;
+            refreshData();
+        }
+
+        function closeModal() {
+            document.getElementById('attemptModal').style.display = 'none';
+        }
+
+        window.onclick = function(event) {
+            if (event.target == document.getElementById('attemptModal')) {
+                closeModal();
+            }
+        }
+
+        refreshData();
+        setInterval(refreshData, 10000);
+    </script>
+</body>
+</html>

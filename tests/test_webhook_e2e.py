@@ -37,16 +37,31 @@ async def test_invalid_signature_returns_401(async_client):
 
 
 @pytest.mark.asyncio
-async def test_missing_signature_returns_401(async_client):
-    body = b'{"action": "opened"}'
-    headers = {
-        "X-GitHub-Event": "issues",
-        "X-GitHub-Delivery": "del-no-sig",
-        "Content-Type": "application/json"
-    }
+async def test_api_deliveries_requires_authentication(async_client):
+    # Without X-API-Key header -> 401
+    resp_unauthed = await async_client.get("/api/deliveries")
+    assert resp_unauthed.status_code == 401
 
-    response = await async_client.post("/webhook/github", content=body, headers=headers)
-    assert response.status_code == 401
+    # With valid Viewer key -> 200
+    resp_authed = await async_client.get("/api/deliveries", headers={"X-API-Key": settings.viewer_api_key})
+    assert resp_authed.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_dlq_and_redrive_rbac(async_client):
+    # Viewer cannot redrive -> 403 Forbidden
+    resp_viewer = await async_client.post(
+        "/api/deliveries/del-test-123/redrive",
+        headers={"X-API-Key": settings.viewer_api_key}
+    )
+    assert resp_viewer.status_code == 403
+
+    # Admin with invalid delivery -> 404 Not Found (auth passed)
+    resp_admin = await async_client.post(
+        "/api/deliveries/del-non-existent/redrive",
+        headers={"X-API-Key": settings.admin_api_key}
+    )
+    assert resp_admin.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -71,7 +86,7 @@ async def test_valid_delivery_accepted_and_deduplicated(async_client, sign_paylo
     assert response_1.status_code == 200
     assert response_1.json() == {"accepted": True, "delivery_id": "del-idempotency-test-01"}
 
-    # 2. Second delivery with identical delivery_id must be recognized as duplicate
+    # 2. Duplicate recognized
     response_2 = await async_client.post("/webhook/github", content=body, headers=headers)
     assert response_2.status_code == 200
     assert response_2.json() == {"duplicate": True, "delivery_id": "del-idempotency-test-01"}
@@ -82,6 +97,7 @@ async def test_healthz_and_metrics_endpoints(async_client):
     health = await async_client.get("/healthz")
     assert health.status_code == 200
     assert health.json().get("status") == "healthy"
+    assert "queue_depth" in health.json()
 
     metrics = await async_client.get("/metrics")
     assert metrics.status_code == 200

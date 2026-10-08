@@ -55,10 +55,10 @@ async def test_status_lifecycle_transitions():
     assert row.status == "sent"
     assert row.attempts == 1
 
-    # Mark failed
+    # Mark failed / dead_letter
     await store.mark_failed("del-202", attempts=5, error="Discord 500 error")
     row = await store.get_delivery("del-202")
-    assert row.status == "failed"
+    assert row.status == "dead_letter"
     assert row.attempts == 5
     assert "Discord 500 error" in row.last_error
 
