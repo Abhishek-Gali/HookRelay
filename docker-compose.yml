@@ -13,6 +13,30 @@ services:
       - VIEWER_API_KEY=${VIEWER_API_KEY:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-https://discord.com/api/webhooks/000000000000000000/dev_placeholder}
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev_only_postgres_password}@db:5432/${POSTGRES_DB:-hookrelay}
+      - REDIS_URL=redis://redis:6379/0
+      - ENABLE_EMBEDS=true
+      - ENABLE_RECONCILIATION=false
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  hookrelay-worker:
+    build: .
+    command: ["python", "-m", "app.worker", "--concurrency", "4"]
+    environment:
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-dev_only_webhook_secret_replace_me}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-https://discord.com/api/webhooks/000000000000000000/dev_placeholder}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-dev_only_postgres_password}@db:5432/${POSTGRES_DB:-hookrelay}
       - ENABLE_EMBEDS=true
       - ENABLE_RECONCILIATION=true
     depends_on:
@@ -25,6 +49,16 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   db:
     image: postgres:16-alpine
@@ -44,3 +78,4 @@ services:
 
 volumes:
   postgres_data:
+

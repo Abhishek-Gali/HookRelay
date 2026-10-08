@@ -296,4 +296,76 @@ async def test_partial_destination_failure_redrive_skips_already_succeeded_desti
     await store.close()
 
 
+@pytest.mark.asyncio
+async def test_multi_worker_distributed_pool_drains_100_jobs_without_duplicates(monkeypatch):
+    """
+    Proves 4 concurrent distributed workers (worker-0..worker-3) can drain 100 queued
+    deliveries simultaneously with zero duplicate dispatches and 100% completion.
+    """
+    import httpx
+    from app.dispatcher import ResilientDispatcher
+    from app.routing import parse_persisted_destinations
+    from app import providers as providers_module
+
+    monkeypatch.setattr(providers_module, "_enforce_outbound_ssrf_guard", lambda url: {})
+
+    store = DeliveryStore("sqlite+aiosqlite:///:memory:")
+    await store.init_db()
+    broker = DatabaseQueueBroker(delivery_store=store, lease_seconds=60)
+    await broker.start()
+
+    for i in range(100):
+        await store.claim_delivery(
+            delivery_id=f"del-pool-{i:03d}",
+            event_type="push",
+            repo="Abhishek-Gali/HookRelay",
+            payload={"repository": {"full_name": "Abhishek-Gali/HookRelay"}, "commits": [{"id": str(i)}]},
+            destinations=[{"provider": "discord", "url": "https://discord.com/api/webhooks/111/pool", "status": "pending"}],
+        )
+
+    dispatched_ids = []
+
+    def mock_handler(request: httpx.Request):
+        dispatched_ids.append(request.headers.get("X-HookRelay-Delivery-ID"))
+        return httpx.Response(204)
+
+    disp = ResilientDispatcher(store=store, max_retries=1)
+    transport = httpx.MockTransport(mock_handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        async def worker_drain(idx: int):
+            wid = f"dist-worker-{idx}"
+            count = 0
+            while True:
+                job = await broker.dequeue(worker_id=wid)
+                if not job:
+                    break
+                dests = parse_persisted_destinations(
+                    job["destinations"],
+                    "https://discord.com/api/webhooks/111/pool",
+                    only_unsent=True,
+                )
+                await disp.dispatch_job(
+                    delivery_id=job["delivery_id"],
+                    event_type=job["event_type"],
+                    payload=job["payload"],
+                    destinations=dests,
+                    client=client,
+                    worker_id=wid,
+                    lease_generation=job["lease_generation"],
+                    trigger_type="worker",
+                )
+                count += 1
+            return count
+
+        counts = await asyncio.gather(*(worker_drain(w) for w in range(4)))
+
+    assert sum(counts) == 100
+    assert len(dispatched_ids) == 100
+    assert len(set(dispatched_ids)) == 100  # Zero duplicates
+
+    await broker.stop()
+    await store.close()
+
+
+
 

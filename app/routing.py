@@ -63,9 +63,7 @@ def resolve_and_validate_hostname(hostname: str, allow_private: bool = False) ->
 
     for family, _, _, _, sockaddr in addr_info:
         if family in (socket.AF_INET, socket.AF_INET6) and sockaddr:
-            resolved_ip = sockaddr[0]
-            # Strip IPv6 scope ID if present (e.g. fe80::1%eth0)
-            resolved_ip = resolved_ip.split("%")[0]
+            resolved_ip = str(sockaddr[0]).split("%")[0]
             _assert_ip_is_public(resolved_ip, label=hostname)
 
 
@@ -140,10 +138,11 @@ def resolve_and_pin_destination(
     validated_ip: Optional[str] = None
     for family, _, _, _, sockaddr in addr_info:
         if family in (socket.AF_INET, socket.AF_INET6) and sockaddr:
-            candidate_ip = sockaddr[0].split("%")[0]
+            candidate_ip = str(sockaddr[0]).split("%")[0]
             _assert_ip_is_public(candidate_ip, label=hostname)
             if validated_ip is None:
                 validated_ip = candidate_ip
+
 
     extensions = {"sni_hostname": hostname} if validated_ip else {}
     return clean_url, validated_ip, extensions

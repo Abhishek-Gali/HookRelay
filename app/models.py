@@ -2,9 +2,12 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Set
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey, Float, Index
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import DeclarativeBase, relationship
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    pass
+
 
 # Formal Delivery State Machine
 VALID_STATE_TRANSITIONS: Dict[str, Set[str]] = {
