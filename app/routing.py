@@ -118,9 +118,41 @@ def validate_ssrf_safe_url(
     return url.strip()
 
 
+def resolve_and_pin_destination(
+    url: str,
+    allow_private: bool = False
+) -> tuple[str, Optional[str], Dict[str, Any]]:
+    """
+    Validates URL and resolves DNS, returning (validated_url, validated_ip_or_none, sni_extensions)
+    to eliminate DNS-rebinding TOCTOU between validation and socket connect.
+    """
+    clean_url = validate_ssrf_safe_url(url, allow_private=allow_private, resolve_dns=True)
+    parsed = urlparse(clean_url)
+    hostname = (parsed.hostname or "").strip().lower()
+    if allow_private or not hostname:
+        return clean_url, None, {}
+
+    try:
+        addr_info = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except socket.gaierror:
+        return clean_url, None, {}
+
+    validated_ip: Optional[str] = None
+    for family, _, _, _, sockaddr in addr_info:
+        if family in (socket.AF_INET, socket.AF_INET6) and sockaddr:
+            candidate_ip = sockaddr[0].split("%")[0]
+            _assert_ip_is_public(candidate_ip, label=hostname)
+            if validated_ip is None:
+                validated_ip = candidate_ip
+
+    extensions = {"sni_hostname": hostname} if validated_ip else {}
+    return clean_url, validated_ip, extensions
+
+
 class RouteDestination(BaseModel):
     provider: str = Field(default="discord", description="discord, slack, or http")
     url: str = Field(description="Target webhook endpoint URL")
+    status: str = Field(default="pending", description="Destination delivery state: pending, sent, failed")
 
     @field_validator("provider")
     @classmethod
@@ -154,25 +186,38 @@ class RouteRule(BaseModel):
 
 
 def parse_persisted_destinations(
-    destinations_raw: Optional[str],
-    default_url: str
+    destinations_raw: Optional[Any],
+    default_url: str,
+    only_unsent: bool = False
 ) -> List[RouteDestination]:
     """
     Reconstructs the exact RouteDestination list persisted at webhook ingestion time.
-    Used by worker loops, reconciliation sweeps, and redrive operations so original
-    routing is never lost.
+    Accepts either a JSON string or an already-parsed list of dicts/RouteDestination objects.
+    If only_unsent=True, filters out destinations that have already succeeded ('status' == 'sent')
+    so partial-failure redrives/reconciliations never send duplicate messages to already-successful targets.
     """
     if destinations_raw:
         try:
-            parsed = json.loads(destinations_raw)
+            parsed = json.loads(destinations_raw) if isinstance(destinations_raw, str) else destinations_raw
             if isinstance(parsed, list) and parsed:
-                return [RouteDestination(**item) for item in parsed if isinstance(item, dict)]
+                all_dests: List[RouteDestination] = []
+                for item in parsed:
+                    if isinstance(item, RouteDestination):
+                        all_dests.append(item)
+                    elif isinstance(item, dict):
+                        all_dests.append(RouteDestination(**item))
+                if all_dests:
+                    if only_unsent:
+                        unsent = [d for d in all_dests if d.status != "sent"]
+                        return unsent if unsent else all_dests
+                    return all_dests
         except Exception:
             pass
 
     if default_url:
         return [RouteDestination(provider="discord", url=default_url)]
     return []
+
 
 
 class RoutingEngine:

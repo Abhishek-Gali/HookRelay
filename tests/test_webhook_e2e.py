@@ -231,7 +231,9 @@ async def test_redrive_preserves_original_destinations(async_client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["redriving"] is True
-    assert data["destinations"] == orig_dest
+    assert len(data["destinations"]) == 1
+    assert data["destinations"][0]["provider"] == "slack"
+    assert data["destinations"][0]["url"] == "https://hooks.slack.com/services/T00/B00/ORIG"
 
 
 @pytest.mark.asyncio
@@ -275,14 +277,61 @@ async def test_valid_delivery_accepted_and_deduplicated(async_client, sign_paylo
 
 
 @pytest.mark.asyncio
+async def test_same_signed_body_different_delivery_id_replay_detected(async_client, sign_payload):
+    """
+    HR-04: Proves that an attacker who captures a valid signed webhook request and
+    replays the exact same signed body with a mutated X-GitHub-Delivery header within
+    the replay window is blocked as a duplicate/replay.
+    """
+    body = json.dumps({
+        "action": "opened",
+        "issue": {"title": "Replay attack test", "html_url": "https://github.com/app/issues/99"},
+        "repository": {"full_name": "org/app"},
+        "sender": {"login": "mallory"}
+    }).encode("utf-8")
+
+    sig = sign_payload(body)
+    resp_orig = await async_client.post(
+        "/webhook/github",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": sig,
+            "X-GitHub-Event": "issues",
+            "X-GitHub-Delivery": "del-orig-capture-001",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp_orig.status_code == 200
+    assert resp_orig.json()["accepted"] is True
+
+    # Replay exact same signed payload with a brand-new X-GitHub-Delivery header
+    resp_replay = await async_client.post(
+        "/webhook/github",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": sig,
+            "X-GitHub-Event": "issues",
+            "X-GitHub-Delivery": "del-forged-replay-002",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp_replay.status_code == 200
+    assert resp_replay.json()["duplicate"] is True
+
+
+@pytest.mark.asyncio
 async def test_healthz_live_and_ready_endpoints(async_client):
     live = await async_client.get("/health/live")
     assert live.status_code == 200
-    assert live.json()["status"] == "alive"
+    assert live.json() == {"status": "alive"}
 
     ready = await async_client.get("/health/ready")
     assert ready.status_code == 200
     assert ready.json()["status"] == "healthy"
     assert ready.json()["database"] == "connected"
-    assert "queue_depth" in ready.json()
+    # HR-13: Unauthenticated health endpoints must not leak environment or queue_depth
+    assert "environment" not in ready.json()
+    assert "queue_depth" not in ready.json()
+    assert "version" not in ready.json()
+
 

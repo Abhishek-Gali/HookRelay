@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Optional, List
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends, status, Query, Response
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
@@ -109,10 +109,11 @@ async def queue_worker_loop():
             payload = job["payload"]
             destinations = [RouteDestination(**d) for d in job["destinations"]]
             wid = job.get("worker_id")
+            lease_gen = job.get("lease_generation")
             trigger_type = job.get("trigger_type", "initial")
 
             logger.info(
-                f"Worker [{wid}] processing leased job: "
+                f"Worker [{wid} gen={lease_gen}] processing leased job: "
                 f"{delivery_id} ({event_type}) -> {len(destinations)} destination(s)"
             )
             await dispatcher.dispatch_job(
@@ -122,6 +123,7 @@ async def queue_worker_loop():
                 destinations=destinations,
                 client=http_client,
                 worker_id=wid,
+                lease_generation=lease_gen,
                 trigger_type=trigger_type
             )
         except asyncio.CancelledError:
@@ -252,13 +254,15 @@ async def github_webhook(request: Request):
     )
     destinations_list = [d.model_dump() for d in destinations]
 
-    # Atomic SQL claim persists payload AND exact structured destinations
+    # Atomic SQL claim persists payload, SHA-256 replay fingerprint, and exact structured destinations
     is_claimed = await store.claim_delivery(
         delivery_id=delivery_id,
         event_type=event_type,
         repo=repo_name,
         payload=payload,
-        destinations=destinations_list
+        destinations=destinations_list,
+        raw_body=raw_body,
+        replay_window_seconds=settings.replay_window_seconds
     )
 
     if not is_claimed:
@@ -327,7 +331,9 @@ async def redrive_delivery(
 ):
     """
     Replays or redrives a failed/dead_letter delivery via the durable SQL queue.
-    By default preserves the exact destinations persisted at original ingestion time.
+    By default preserves the exact destinations persisted at original ingestion time,
+    filtering out destinations that already succeeded ('status' == 'sent') so partial
+    failures never duplicate already-successful targets (HR-06).
     """
     _sync_store_bindings()
     record = await store.get_delivery(delivery_id)
@@ -344,10 +350,11 @@ async def redrive_delivery(
     else:
         destinations = parse_persisted_destinations(
             record.destinations,
-            default_url=settings.discord_webhook_url
+            default_url=settings.discord_webhook_url,
+            only_unsent=True
         )
 
-    dest_dicts = [d.model_dump() for d in destinations]
+    dest_dicts = [{"provider": d.provider, "url": d.url} for d in destinations]
     try:
         await store.prepare_for_redrive(
             delivery_id=delivery_id,
@@ -360,7 +367,7 @@ async def redrive_delivery(
         "delivery_id": record.delivery_id,
         "event_type": record.event_type,
         "payload": payload,
-        "destinations": dest_dicts
+        "destinations": [d.model_dump() for d in destinations]
     }
     await queue_broker.enqueue(job_data)
 
@@ -497,13 +504,27 @@ async def login_session(body: LoginRequest, request: Request, response: Response
     return {"authenticated": True, "role": role.value, "csrf_token": csrf_token}
 
 
-@app.post("/api/auth/logout", dependencies=[Depends(check_api_rate_limit)])
-async def logout_session(request: Request, response: Response):
-    """Revokes the active browser session and clears the HttpOnly cookie."""
+@app.post(
+    "/api/auth/logout",
+    dependencies=[Depends(check_api_rate_limit)]
+)
+async def logout_session(
+    request: Request,
+    response: Response,
+    role: Role = Depends(require_role([Role.ADMIN, Role.OPERATOR, Role.VIEWER]))
+):
+    """Revokes the active browser session (requiring auth + CSRF token) and clears the HttpOnly cookie (HR-14)."""
     session_cookie = request.cookies.get("hr_session")
     if session_cookie:
         session_manager.revoke_session(session_cookie)
     response.delete_cookie(key="hr_session", path="/")
+    await _audit_security_event(
+        request,
+        actor_role=role.value,
+        action="session_logout",
+        status_str="success",
+        details="Browser session terminated"
+    )
     return {"authenticated": False}
 
 
@@ -529,14 +550,23 @@ _ALLOWED_STATIC_ASSETS = {
 
 @app.get("/static/{asset_name}")
 async def serve_static_asset(asset_name: str):
-    """Serves whitelisted static dashboard assets (CSS/JS) for strict CSP compliance."""
+    """
+    Serves whitelisted static dashboard assets from memory using plain Response
+    instead of FileResponse to eliminate Range-header parsing attack surface (HR-01).
+    """
     if asset_name not in _ALLOWED_STATIC_ASSETS:
         raise HTTPException(status_code=404, detail="Static asset not found.")
     media_type, filename = _ALLOWED_STATIC_ASSETS[asset_name]
     asset_path = os.path.join(os.path.dirname(__file__), "ui", filename)
     if not os.path.exists(asset_path):
         raise HTTPException(status_code=404, detail="Static asset file missing.")
-    return FileResponse(asset_path, media_type=media_type)
+    with open(asset_path, "rb") as f:
+        content = f.read()
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=300"}
+    )
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -551,8 +581,8 @@ async def serve_dashboard():
 
 @app.get("/health/live")
 async def health_live():
-    """Kubernetes liveness probe: confirms the process event loop is responsive."""
-    return {"status": "alive", "service": "HookRelay", "version": "2.1.0"}
+    """Minimal liveness probe without operational info disclosure (HR-13)."""
+    return {"status": "alive"}
 
 
 @app.get("/health/ready")
@@ -560,24 +590,19 @@ async def health_live():
 async def health_ready():
     """
     Readiness probe: actively verifies SQL database connectivity (SELECT 1)
-    and reports durable queue depth. Returns HTTP 503 if database is unreachable.
+    without leaking environment or internal queue depth on unauthenticated endpoints (HR-13).
     """
     _sync_store_bindings()
     db_ok = await store.check_health()
     if not db_ok:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "unhealthy", "reason": "database_unreachable"}
+            content={"status": "unhealthy", "database": "unreachable"}
         )
 
-    depth = await queue_broker.get_depth()
     return {
         "status": "healthy",
-        "service": "HookRelay",
-        "version": "2.1.0",
-        "database": "connected",
-        "queue_depth": depth,
-        "environment": settings.environment
+        "database": "connected"
     }
 
 
@@ -585,7 +610,7 @@ async def health_ready():
 async def metrics(request: Request):
     """
     Exposes Prometheus metrics.
-    If settings.require_metrics_auth is True, enforces X-API-Key authentication.
+    Requires authentication by default (settings.require_metrics_auth = True, HR-12).
     """
     if settings.require_metrics_auth:
         await get_current_user_role(request=request, x_api_key=request.headers.get("X-API-Key"))

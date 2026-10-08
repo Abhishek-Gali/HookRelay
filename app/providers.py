@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import json
 import re
 from typing import Any, Dict, Optional, Tuple
 import httpx
@@ -9,12 +10,16 @@ _WEBHOOK_SECRET_RE = re.compile(
     r"(/api/webhooks/\d+/)([A-Za-z0-9_\-\.]+)|(/services/T[A-Za-z0-9_]+/B[A-Za-z0-9_]+/)([A-Za-z0-9_\-\.]+)",
     re.IGNORECASE
 )
+_URL_QUERY_OR_AUTH_RE = re.compile(
+    r"(https?://)([^/\s:@]+:[^/\s@]+@)?([^\s/?#]+)(/[^\s?#]*)?(\?[^\s#]*)?",
+    re.IGNORECASE
+)
 
 
 def sanitize_error_message(raw_msg: Optional[str]) -> Optional[str]:
     """
-    Redacts webhook secret tokens or sensitive URLs from error strings and bounds length
-    to settings.max_error_body_bytes to prevent operational credential/info leakage.
+    Redacts webhook secret tokens, URL userinfo credentials, and query strings from error
+    messages and bounds length to settings.max_error_body_bytes.
     """
     if not raw_msg:
         return None
@@ -22,7 +27,33 @@ def sanitize_error_message(raw_msg: Optional[str]) -> Optional[str]:
         lambda m: f"{m.group(1) or m.group(3)}[REDACTED]",
         str(raw_msg)
     )
+    cleaned = _URL_QUERY_OR_AUTH_RE.sub(
+        lambda m: f"{m.group(1)}{'[REDACTED]@' if m.group(2) else ''}{m.group(3)}{m.group(4) or ''}{'?[REDACTED]' if m.group(5) else ''}",
+        cleaned
+    )
     return cleaned[: settings.max_error_body_bytes]
+
+
+def format_safe_exception(exc: Exception, provider_name: str) -> str:
+    """
+    Produces a structured, credential-safe error record without persisting raw
+    arbitrary exception strings that could leak destination URLs or tokens (HR-10).
+    """
+    exc_type = type(exc).__name__
+    if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.TimeoutException)):
+        category = "network_timeout"
+    elif isinstance(exc, httpx.ConnectError):
+        category = "connection_error"
+    elif isinstance(exc, ValueError) and "SSRF Protection" in str(exc):
+        category = "ssrf_blocked"
+    else:
+        category = "transport_error"
+
+    return json.dumps({
+        "type": exc_type,
+        "provider": provider_name,
+        "category": category
+    })
 
 
 def extract_retry_after(resp: httpx.Response) -> Optional[float]:
@@ -51,12 +82,14 @@ def extract_retry_after(resp: httpx.Response) -> Optional[float]:
     return None
 
 
-def read_bounded_error(resp: httpx.Response) -> Optional[str]:
+def read_bounded_error(resp: httpx.Response, include_body: bool = True) -> Optional[str]:
     """Reads at most settings.max_error_body_bytes characters from an error response and redacts secrets."""
     if resp.status_code < 300:
         return None
     if 300 <= resp.status_code < 400:
         return f"Redirect responses ({resp.status_code}) are disallowed by SSRF policy."
+    if not include_body:
+        return f"HTTP {resp.status_code}"
     try:
         raw_text = resp.text or ""
         return sanitize_error_message(raw_text)
@@ -64,14 +97,17 @@ def read_bounded_error(resp: httpx.Response) -> Optional[str]:
         return f"HTTP {resp.status_code}"
 
 
-def _enforce_outbound_ssrf_guard(destination_url: str) -> None:
-    """Re-validates destination URL and DNS resolution right before outbound connection (anti-DNS-rebinding)."""
-    from app.routing import validate_ssrf_safe_url
-    validate_ssrf_safe_url(
+def _enforce_outbound_ssrf_guard(destination_url: str) -> Dict[str, Any]:
+    """
+    Re-validates destination URL and pins validated DNS resolution metadata right
+    before outbound connection (HR-05).
+    """
+    from app.routing import resolve_and_pin_destination
+    _, _, sni_extensions = resolve_and_pin_destination(
         destination_url,
-        allow_private=settings.allow_private_destinations,
-        resolve_dns=True
+        allow_private=settings.allow_private_destinations
     )
+    return sni_extensions
 
 
 class NotificationProvider(ABC):
@@ -112,19 +148,25 @@ class DiscordProvider(NotificationProvider):
         use_embeds: bool = True,
         delivery_id: Optional[str] = None
     ) -> Tuple[int, Optional[str], Optional[str]]:
-        _enforce_outbound_ssrf_guard(destination_url)
+        extensions = _enforce_outbound_ssrf_guard(destination_url)
         body = format_payload(event_type, payload, use_embeds=use_embeds)
         headers = {"Content-Type": "application/json"}
         if delivery_id:
             headers["X-HookRelay-Delivery-ID"] = delivery_id
 
-        resp = await client.post(destination_url, json=body, headers=headers, follow_redirects=False)
+        resp = await client.post(
+            destination_url,
+            json=body,
+            headers=headers,
+            follow_redirects=False,
+            extensions=extensions
+        )
         headers_summary = None
         if resp.status_code == 429:
             retry_after = extract_retry_after(resp)
             if retry_after is not None:
                 headers_summary = f"Retry-After={retry_after}"
-        error_msg = read_bounded_error(resp)
+        error_msg = read_bounded_error(resp, include_body=True)
         return resp.status_code, error_msg, headers_summary
 
 
@@ -141,7 +183,7 @@ class SlackProvider(NotificationProvider):
         use_embeds: bool = True,
         delivery_id: Optional[str] = None
     ) -> Tuple[int, Optional[str], Optional[str]]:
-        _enforce_outbound_ssrf_guard(destination_url)
+        extensions = _enforce_outbound_ssrf_guard(destination_url)
         repo = truncate(sanitize_mentions(payload.get("repository", {}).get("full_name", "Repository")), 120)
         sender = truncate(sanitize_mentions(payload.get("sender", {}).get("login", "GitHub")), 80)
         safe_event = truncate(sanitize_mentions(event_type), 60)
@@ -163,13 +205,19 @@ class SlackProvider(NotificationProvider):
         if delivery_id:
             headers["X-HookRelay-Delivery-ID"] = delivery_id
 
-        resp = await client.post(destination_url, json=slack_body, headers=headers, follow_redirects=False)
+        resp = await client.post(
+            destination_url,
+            json=slack_body,
+            headers=headers,
+            follow_redirects=False,
+            extensions=extensions
+        )
         headers_summary = None
         if resp.status_code == 429:
             retry_after = extract_retry_after(resp)
             if retry_after is not None:
                 headers_summary = f"Retry-After={retry_after}"
-        error_msg = read_bounded_error(resp)
+        error_msg = read_bounded_error(resp, include_body=True)
         return resp.status_code, error_msg, headers_summary
 
 
@@ -186,7 +234,7 @@ class GenericHttpProvider(NotificationProvider):
         use_embeds: bool = True,
         delivery_id: Optional[str] = None
     ) -> Tuple[int, Optional[str], Optional[str]]:
-        _enforce_outbound_ssrf_guard(destination_url)
+        extensions = _enforce_outbound_ssrf_guard(destination_url)
         headers = {
             "Content-Type": "application/json",
             "X-HookRelay-Event": event_type,
@@ -195,13 +243,20 @@ class GenericHttpProvider(NotificationProvider):
         if delivery_id:
             headers["X-HookRelay-Delivery-ID"] = delivery_id
 
-        resp = await client.post(destination_url, json=payload, headers=headers, follow_redirects=False)
+        resp = await client.post(
+            destination_url,
+            json=payload,
+            headers=headers,
+            follow_redirects=False,
+            extensions=extensions
+        )
         headers_summary = None
         if resp.status_code == 429:
             retry_after = extract_retry_after(resp)
             if retry_after is not None:
                 headers_summary = f"Retry-After={retry_after}"
-        error_msg = read_bounded_error(resp)
+        # HR-10: Do not persist arbitrary response bodies from generic HTTP endpoints
+        error_msg = read_bounded_error(resp, include_body=False)
         return resp.status_code, error_msg, headers_summary
 
 

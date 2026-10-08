@@ -5,10 +5,10 @@ from typing import Dict, Any, List, Optional
 import httpx
 
 from app.config import settings
-from app.providers import get_provider, sanitize_error_message
+from app.providers import get_provider, format_safe_exception
 from app.routing import RouteDestination
 from app.sender import RetryPolicy
-from app.store import DeliveryStore
+from app.store import DeliveryStore, StaleWorkerLeaseError
 from app.metrics import (
     PROVIDER_DISPATCHES_TOTAL,
     PROVIDER_RETRIES_TOTAL,
@@ -22,9 +22,12 @@ logger = logging.getLogger("hookrelay.dispatcher")
 class ResilientDispatcher:
     """
     Handles multi-destination resilient dispatch of webhook payloads
-    (Discord, Slack, HTTP), using the unified RetryPolicy, renewing worker leases
-    during long deliveries/retries, recording granular attempts with trigger source,
-    and updating DLQ state on terminal failure.
+    (Discord, Slack, HTTP) with:
+    - Monotonic fencing tokens (worker_id + lease_generation) so stale workers abort immediately
+    - Per-destination state tracking ('pending' -> 'sent' | 'failed') so redrives never duplicate
+      already-successful destinations
+    - Unified RetryPolicy honoring Retry-After
+    - Structured, credential-safe error recording
     """
     def __init__(
         self,
@@ -42,6 +45,7 @@ class ResilientDispatcher:
         self,
         delivery_id: str,
         worker_id: str,
+        lease_generation: Optional[int],
         stop_event: asyncio.Event
     ) -> None:
         """Periodically extends the worker lease while a delivery is actively in flight."""
@@ -52,11 +56,15 @@ class ResilientDispatcher:
                 break
             except asyncio.TimeoutError:
                 try:
-                    await self.store.renew_lease(
+                    ok = await self.store.renew_lease(
                         delivery_id=delivery_id,
                         worker_id=worker_id,
-                        lease_seconds=settings.worker_lease_seconds
+                        lease_seconds=settings.worker_lease_seconds,
+                        lease_generation=lease_generation
                     )
+                    if not ok:
+                        stop_event.set()
+                        break
                 except Exception:
                     pass
 
@@ -68,12 +76,12 @@ class ResilientDispatcher:
         destinations: List[RouteDestination],
         client: Optional[httpx.AsyncClient] = None,
         worker_id: Optional[str] = None,
+        lease_generation: Optional[int] = None,
         trigger_type: str = "initial"
     ) -> bool:
         """
-        Iterates over destinations, executing exponential backoff retries with jitter
-        via RetryPolicy, renewing the worker lease on long sleeps, and logging every
-        attempt with its trigger_type ('initial', 'retry', 'reconciliation', 'redrive').
+        Iterates over unsent destinations, verifying fencing token ownership before each attempt,
+        persisting per-destination completion state, and enforcing ownership on final state transitions.
         """
         active_client = client
         should_close = False
@@ -85,7 +93,7 @@ class ResilientDispatcher:
         heartbeat_task: Optional[asyncio.Task] = None
         if worker_id:
             heartbeat_task = asyncio.create_task(
-                self._lease_heartbeat_loop(delivery_id, worker_id, heartbeat_stop)
+                self._lease_heartbeat_loop(delivery_id, worker_id, lease_generation, heartbeat_stop)
             )
 
         all_succeeded = True
@@ -94,11 +102,29 @@ class ResilientDispatcher:
 
         try:
             for dest in destinations:
+                # HR-06: Skip destinations that have already succeeded on a prior attempt
+                if getattr(dest, "status", "pending") == "sent":
+                    continue
+
                 provider = get_provider(dest.provider)
                 dest_url = dest.url
                 success = False
 
                 for attempt_num in range(1, self.policy.max_attempts + 1):
+                    # HR-02: Verify fencing token ownership BEFORE making an outbound HTTP call
+                    if worker_id is not None and lease_generation is not None:
+                        still_owns = await self.store.renew_lease(
+                            delivery_id=delivery_id,
+                            worker_id=worker_id,
+                            lease_seconds=settings.worker_lease_seconds,
+                            lease_generation=lease_generation
+                        )
+                        if not still_owns:
+                            logger.warning(
+                                f"Worker '{worker_id}' (gen={lease_generation}) lost lease on {delivery_id}; aborting."
+                            )
+                            return False
+
                     overall_attempts += 1
                     t0 = time.perf_counter()
                     status_code: Optional[int] = None
@@ -114,11 +140,9 @@ class ResilientDispatcher:
                             use_embeds=settings.enable_embeds,
                             delivery_id=delivery_id
                         )
-                    except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as net_err:
-                        error_msg = sanitize_error_message(f"Network error: {type(net_err).__name__}: {str(net_err)}")
-                        status_code = None
                     except Exception as exc:
-                        error_msg = sanitize_error_message(f"Dispatch error: {type(exc).__name__}: {str(exc)}")
+                        # HR-10: Record structured safe exception metadata instead of raw str(exc)
+                        error_msg = format_safe_exception(exc, dest.provider)
                         status_code = None
 
                     duration_ms = (time.perf_counter() - t0) * 1000
@@ -140,6 +164,15 @@ class ResilientDispatcher:
                             f"Delivered {delivery_id} to {dest.provider} on attempt {attempt_num} ({attempt_trigger})."
                         )
                         success = True
+                        dest.status = "sent"
+                        await self.store.update_destination_status(
+                            delivery_id=delivery_id,
+                            provider=dest.provider,
+                            url=dest_url,
+                            dest_status="sent",
+                            worker_id=worker_id,
+                            lease_generation=lease_generation
+                        )
                         PROVIDER_DISPATCHES_TOTAL.labels(
                             provider=dest.provider, event=event_type, status="sent"
                         ).inc()
@@ -166,13 +199,15 @@ class ResilientDispatcher:
 
                     if attempt_num < self.policy.max_attempts:
                         sleep_s = self.policy.compute_sleep_seconds(attempt_num, retry_after=retry_after_val)
-                        # Extend worker lease before sleeping so long Retry-After waits never expire the lease
                         if worker_id:
-                            await self.store.renew_lease(
+                            still_owns = await self.store.renew_lease(
                                 delivery_id=delivery_id,
                                 worker_id=worker_id,
-                                lease_seconds=max(settings.worker_lease_seconds, int(sleep_s) + 60)
+                                lease_seconds=max(settings.worker_lease_seconds, int(sleep_s) + 60),
+                                lease_generation=lease_generation
                             )
+                            if not still_owns:
+                                return False
                         logger.warning(
                             f"Transient failure on {delivery_id} (attempt {attempt_num}/{self.policy.max_attempts}). "
                             f"Sleeping {sleep_s:.2f}s before retry..."
@@ -183,21 +218,41 @@ class ResilientDispatcher:
 
                 if not success:
                     all_succeeded = False
+                    dest.status = "failed"
+                    await self.store.update_destination_status(
+                        delivery_id=delivery_id,
+                        provider=dest.provider,
+                        url=dest_url,
+                        dest_status="failed",
+                        worker_id=worker_id,
+                        lease_generation=lease_generation
+                    )
                     PROVIDER_DISPATCHES_TOTAL.labels(
                         provider=dest.provider, event=event_type, status="failed"
                     ).inc()
                     logger.error(f"Delivery {delivery_id} failed permanently for {dest.provider}.")
 
-            if all_succeeded:
-                await self.store.mark_sent(delivery_id, attempts=overall_attempts)
-                return True
-            else:
-                await self.store.mark_failed_or_dlq(
-                    delivery_id,
-                    attempts=overall_attempts,
-                    error=last_error_summary
-                )
-                DISCORD_DISPATCHES_TOTAL.labels(event=event_type, status="failed").inc()
+            try:
+                if all_succeeded:
+                    await self.store.mark_sent(
+                        delivery_id,
+                        attempts=overall_attempts,
+                        worker_id=worker_id,
+                        lease_generation=lease_generation
+                    )
+                    return True
+                else:
+                    await self.store.mark_failed_or_dlq(
+                        delivery_id,
+                        attempts=overall_attempts,
+                        error=last_error_summary,
+                        worker_id=worker_id,
+                        lease_generation=lease_generation
+                    )
+                    DISCORD_DISPATCHES_TOTAL.labels(event=event_type, status="failed").inc()
+                    return False
+            except StaleWorkerLeaseError as fenced_err:
+                logger.warning(f"Fenced out during final state transition for {delivery_id}: {fenced_err}")
                 return False
         finally:
             heartbeat_stop.set()

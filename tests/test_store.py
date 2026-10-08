@@ -76,3 +76,58 @@ async def test_status_lifecycle_transitions_and_state_machine():
         await store.mark_sent("del-203", attempts=6)
 
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_retention_policy_scrubs_payloads_and_prunes_old_logs():
+    """
+    HR-09: Proves enforce_retention_policy() scrubs raw webhook payloads on old terminal
+    deliveries (while keeping the delivery_id row for idempotency) and deletes expired
+    delivery_attempts and audit_logs rows.
+    """
+    from datetime import datetime, timezone, timedelta
+    from sqlalchemy import update
+    from app.models import DeliveryModel, DeliveryAttemptModel, AuditLogModel
+
+    store = DeliveryStore("sqlite+aiosqlite:///:memory:")
+    await store.init_db()
+
+    await store.claim_delivery("del-ret-001", "push", "org/repo", {"secret_commit": "abc"})
+    await store.mark_sent("del-ret-001", attempts=1)
+    await store.record_attempt(
+        delivery_id="del-ret-001",
+        destination="discord",
+        attempt_number=1,
+        http_status=204,
+        response_time_ms=12.5,
+    )
+    await store.record_audit_log(actor_role="ADMIN", action="redrive", target_id="del-ret-001")
+
+    old_date = datetime.now(timezone.utc) - timedelta(days=120)
+    async with store.session_factory() as session:
+        await session.execute(update(DeliveryModel).values(updated_at=old_date))
+        await session.execute(update(DeliveryAttemptModel).values(created_at=old_date))
+        await session.execute(update(AuditLogModel).values(created_at=old_date))
+        await session.commit()
+
+    summary = await store.enforce_retention_policy(
+        payload_days=14,
+        attempt_days=30,
+        audit_days=90,
+    )
+    assert summary["scrubbed_payloads"] == 1
+    assert summary["deleted_attempts"] == 1
+    assert summary["deleted_audit_logs"] == 1
+
+    # Delivery row still exists for idempotency, but payload is NULL
+    row = await store.get_delivery("del-ret-001", include_attempts=True)
+    assert row is not None
+    assert row.payload is None
+    assert len(row.attempt_history) == 0
+
+    # Re-claiming the same delivery_id is still blocked
+    assert await store.claim_delivery("del-ret-001", "push", "org/repo", {"secret_commit": "abc"}) is False
+
+    await store.close()
+
+

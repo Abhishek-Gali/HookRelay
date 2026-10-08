@@ -35,6 +35,7 @@ class DeliveryModel(Base):
     __table_args__ = (
         Index("idx_deliveries_reconciliation", "status", "locked_until", "updated_at"),
         Index("idx_deliveries_queue_poll", "status", "next_run_at", "locked_until"),
+        Index("idx_deliveries_replay_hash", "event_type", "payload_hash", "created_at"),
         Index("idx_deliveries_created", "created_at"),
     )
 
@@ -49,11 +50,13 @@ class DeliveryModel(Base):
     )  # 'received' | 'queued' | 'processing' | 'retry_wait' | 'sent' | 'dead_letter' | 'discarded'
     attempts = Column(Integer, nullable=False, default=0)
     last_error = Column(Text, nullable=True)
-    payload = Column(Text, nullable=True)       # JSON payload string
-    destinations = Column(Text, nullable=True)  # Structured JSON list: [{"provider": "discord", "url": "..."}]
+    payload = Column(Text, nullable=True)         # JSON payload string (scrubbed after retention window)
+    payload_hash = Column(String, nullable=True, index=True)  # SHA-256 fingerprint of raw signed body
+    destinations = Column(Text, nullable=True)    # Structured JSON list: [{"provider": "discord", "url": "...", "status": "pending|sent|failed"}]
 
-    # Durable Queue & Atomic Worker Lease columns
+    # Durable Queue, Atomic Worker Lease & Monotonic Fencing Token columns
     worker_id = Column(String, nullable=True)
+    lease_generation = Column(Integer, nullable=False, default=0)
     locked_until = Column(DateTime(timezone=True), nullable=True)
     next_run_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -149,6 +152,7 @@ class DeliveryDTO(BaseModel):
     last_error: Optional[str] = None
     destinations: Optional[str] = None
     worker_id: Optional[str] = None
+    lease_generation: int = 0
     locked_until: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime

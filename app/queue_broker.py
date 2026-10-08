@@ -90,7 +90,8 @@ class DatabaseQueueBroker(BaseQueueBroker):
             payload = json.loads(leased.payload) if leased.payload else {}
             destinations = parse_persisted_destinations(
                 leased.destinations,
-                default_url=settings.discord_webhook_url
+                default_url=settings.discord_webhook_url,
+                only_unsent=True
             )
             return {
                 "delivery_id": leased.delivery_id,
@@ -98,6 +99,7 @@ class DatabaseQueueBroker(BaseQueueBroker):
                 "payload": payload,
                 "destinations": [d.model_dump() for d in destinations],
                 "worker_id": wid,
+                "lease_generation": leased.lease_generation,
                 "trigger_type": "redrive" if (leased.attempts and leased.attempts > 0) else "initial",
             }
 

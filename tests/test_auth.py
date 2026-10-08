@@ -65,3 +65,18 @@ def test_weak_secret_rejected_in_production():
             github_webhook_secret="strong_production_webhook_secret_key_999",
             admin_api_key="too_short_key",
         )
+
+
+def test_production_rejects_allow_private_destinations():
+    """
+    HR-08: Proves that ALLOW_PRIVATE_DESTINATIONS=true is strictly forbidden
+    when ENVIRONMENT=production.
+    """
+    with pytest.raises(ValidationError, match="ALLOW_PRIVATE_DESTINATIONS"):
+        Settings(
+            environment="production",
+            github_webhook_secret="strong_production_webhook_secret_key_999",
+            admin_api_key="a" * 36,
+            allow_private_destinations=True,
+        )
+

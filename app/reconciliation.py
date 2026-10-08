@@ -72,7 +72,8 @@ async def run_reconciliation_cycle(
 
             destinations = parse_persisted_destinations(
                 leased.destinations,
-                default_url=discord_webhook_url
+                default_url=discord_webhook_url,
+                only_unsent=True
             )
 
             if isinstance(sender, ResilientDispatcher):
@@ -83,6 +84,7 @@ async def run_reconciliation_cycle(
                     destinations=destinations,
                     client=client,
                     worker_id=wid,
+                    lease_generation=leased.lease_generation,
                     trigger_type="reconciliation"
                 )
                 if ok:
@@ -98,6 +100,7 @@ async def run_reconciliation_cycle(
                     destinations=destinations,
                     client=client,
                     worker_id=wid,
+                    lease_generation=leased.lease_generation,
                     trigger_type="reconciliation"
                 )
                 if ok:
@@ -106,6 +109,12 @@ async def run_reconciliation_cycle(
 
         if len(stale_candidates) < effective_batch_size or leased_in_batch == 0:
             break
+
+    # HR-09: Enforce payload, attempt, and audit log retention pruning
+    try:
+        await store.enforce_retention_policy()
+    except Exception as exc:
+        logger.warning(f"Retention policy cleanup encountered error: {exc}")
 
     return recovered_count
 

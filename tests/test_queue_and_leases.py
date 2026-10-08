@@ -127,3 +127,173 @@ async def test_worker_lease_prevents_duplicate_processing_and_reclaims_when_expi
 
     await store.close()
 
+
+@pytest.mark.asyncio
+async def test_fencing_token_rejects_stale_worker_state_mutation():
+    """
+    HR-02 & HR-03: Proves that monotonic fencing tokens (lease_generation) prevent
+    a slow/stalled worker whose lease expired from overwriting state after another
+    worker has reclaimed the job.
+    """
+    from app.store import StaleWorkerLeaseError
+
+    store = DeliveryStore("sqlite+aiosqlite:///:memory:")
+    await store.init_db()
+
+    await store.claim_delivery("del-fencing-001", "push", "org/repo", {"commits": []})
+
+    # Worker A acquires initial lease -> generation 1
+    lease_a = await store.acquire_lease("del-fencing-001", worker_id="worker-A", lease_seconds=60)
+    assert lease_a is not None
+    assert lease_a.lease_generation == 1
+
+    # Simulate Worker A stalling beyond lease expiry
+    expired_time = datetime.now(timezone.utc) - timedelta(minutes=2)
+    async with store.session_factory() as session:
+        await session.execute(
+            update(DeliveryModel)
+            .where(DeliveryModel.delivery_id == "del-fencing-001")
+            .values(locked_until=expired_time)
+        )
+        await session.commit()
+
+    # Worker B reclaims expired lease -> generation increments to 2
+    lease_b = await store.acquire_lease("del-fencing-001", worker_id="worker-B", lease_seconds=60)
+    assert lease_b is not None
+    assert lease_b.worker_id == "worker-B"
+    assert lease_b.lease_generation == 2
+
+    # Stale Worker A (generation 1) wakes up and tries to mark_sent or mark_failed -> MUST FAIL
+    with pytest.raises(StaleWorkerLeaseError):
+        await store.mark_sent(
+            "del-fencing-001",
+            attempts=1,
+            worker_id="worker-A",
+            lease_generation=1,
+        )
+
+    with pytest.raises(StaleWorkerLeaseError):
+        await store.mark_failed_or_dlq(
+            "del-fencing-001",
+            attempts=5,
+            error="stale worker failure",
+            worker_id="worker-A",
+            lease_generation=1,
+        )
+
+    # Stale Worker A cannot renew lease with old generation
+    assert await store.renew_lease("del-fencing-001", worker_id="worker-A", lease_generation=1) is False
+
+    # Active Worker B (generation 2) succeeds in marking sent
+    await store.mark_sent(
+        "del-fencing-001",
+        attempts=1,
+        worker_id="worker-B",
+        lease_generation=2,
+    )
+    final_row = await store.get_delivery("del-fencing-001", include_attempts=False)
+    assert final_row.status == "sent"
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_destination_failure_redrive_skips_already_succeeded_destinations(monkeypatch):
+    """
+    HR-06: Proves that when a multi-destination delivery partially succeeds (e.g. Discord
+    and Slack succeed, but Generic HTTP fails), redriving or re-dispatching the job only
+    retries the failed destination and never duplicates messages to already-sent destinations.
+    """
+    import httpx
+    from app.dispatcher import ResilientDispatcher
+    from app.routing import parse_persisted_destinations
+    from app import providers as providers_module
+
+    # Mock outbound SSRF DNS resolution in unit test so MockTransport works offline
+    monkeypatch.setattr(providers_module, "_enforce_outbound_ssrf_guard", lambda url: {})
+
+
+    store = DeliveryStore("sqlite+aiosqlite:///:memory:")
+    await store.init_db()
+
+    destinations = [
+        {"provider": "discord", "url": "https://discord.com/api/webhooks/111/aaa", "status": "pending"},
+        {"provider": "slack", "url": "https://hooks.slack.com/services/222/bbb", "status": "pending"},
+        {"provider": "http", "url": "https://api.example.com/webhook", "status": "pending"},
+    ]
+    await store.claim_delivery(
+        delivery_id="del-partial-dest-001",
+        event_type="push",
+        repo="Abhishek-Gali/HookRelay",
+        payload={"repository": {"full_name": "Abhishek-Gali/HookRelay"}},
+        destinations=destinations,
+    )
+
+    call_counts = {"discord": 0, "slack": 0, "http": 0}
+    http_should_fail = True
+
+    def mock_handler(request: httpx.Request):
+        host = request.url.host or ""
+        if "discord.com" in host:
+            call_counts["discord"] += 1
+            return httpx.Response(204)
+        if "slack.com" in host:
+            call_counts["slack"] += 1
+            return httpx.Response(200, text="ok")
+        call_counts["http"] += 1
+        if http_should_fail:
+            return httpx.Response(502, text="Bad Gateway")
+        return httpx.Response(200, text="ok")
+
+    disp = ResilientDispatcher(store=store, max_retries=1)
+    transport = httpx.MockTransport(mock_handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        # First run: Discord and Slack succeed, HTTP fails -> job enters dead_letter
+        lease_1 = await store.acquire_lease("del-partial-dest-001", worker_id="w1", lease_seconds=60)
+        dest_objs_1 = parse_persisted_destinations(destinations, "https://discord.com/api/webhooks/111/aaa", only_unsent=True)
+        await disp.dispatch_job(
+            delivery_id="del-partial-dest-001",
+            event_type="push",
+            payload={"repository": {"full_name": "Abhishek-Gali/HookRelay"}},
+            destinations=dest_objs_1,
+            client=client,
+            worker_id="w1",
+            lease_generation=lease_1.lease_generation,
+        )
+
+        row_after_fail = await store.get_delivery("del-partial-dest-001", include_attempts=False)
+        assert row_after_fail.status == "dead_letter"
+        assert call_counts == {"discord": 1, "slack": 1, "http": 1}
+
+        # Now HTTP endpoint recovers and operator redrives / broker dequeues unsent destinations
+        http_should_fail = False
+        await store.prepare_for_redrive("del-partial-dest-001")
+        broker = DatabaseQueueBroker(delivery_store=store, lease_seconds=60)
+        redriven_job = await broker.dequeue(worker_id="w2")
+        assert redriven_job is not None
+        # Only the failed HTTP destination should be scheduled for retry
+        assert len(redriven_job["destinations"]) == 1
+        assert redriven_job["destinations"][0]["provider"] == "http"
+
+        dest_objs_2 = parse_persisted_destinations(redriven_job["destinations"], "https://discord.com/api/webhooks/111/aaa", only_unsent=True)
+        await disp.dispatch_job(
+            delivery_id="del-partial-dest-001",
+            event_type="push",
+            payload=redriven_job["payload"],
+            destinations=dest_objs_2,
+            client=client,
+            worker_id="w2",
+            lease_generation=redriven_job["lease_generation"],
+            trigger_type="redrive",
+        )
+
+
+        row_final = await store.get_delivery("del-partial-dest-001", include_attempts=False)
+        assert row_final.status == "sent"
+        # Discord and Slack were NEVER called a second time; HTTP was called once more
+        assert call_counts == {"discord": 1, "slack": 1, "http": 2}
+
+    await store.close()
+
+
+

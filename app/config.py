@@ -135,6 +135,24 @@ class Settings(BaseSettings):
         description="Age in seconds after which an uncompleted delivery is deemed stale"
     )
 
+    # Replay Protection & Data Retention Policy
+    replay_window_seconds: int = Field(
+        default=300,
+        description="Bounded time window (seconds) in which identical signed webhook bodies with different delivery IDs are rejected as replays"
+    )
+    payload_retention_days: int = Field(
+        default=14,
+        description="Days to retain raw webhook payloads on completed deliveries before scrubbing"
+    )
+    attempt_retention_days: int = Field(
+        default=30,
+        description="Days to retain granular delivery attempt records"
+    )
+    audit_log_retention_days: int = Field(
+        default=90,
+        description="Days to retain security audit log records"
+    )
+
     # Features & Access Control
     enable_embeds: bool = Field(
         default=True,
@@ -145,8 +163,8 @@ class Settings(BaseSettings):
         description="Run background sweep task to recover stranded deliveries"
     )
     require_metrics_auth: bool = Field(
-        default=False,
-        description="Require X-API-Key authentication on /metrics endpoint"
+        default=True,
+        description="Require authentication on /metrics endpoint (enabled by default)"
     )
     allow_private_destinations: bool = Field(
         default=False,
@@ -157,6 +175,10 @@ class Settings(BaseSettings):
     def validate_security_configuration(self) -> "Settings":
         env = self.environment.lower()
         if env == "production":
+            if self.allow_private_destinations:
+                raise ValueError(
+                    "CRITICAL: ALLOW_PRIVATE_DESTINATIONS cannot be enabled in production."
+                )
             if not self.github_webhook_secret or self.github_webhook_secret in INSECURE_DEFAULTS or len(self.github_webhook_secret) < 16:
                 raise ValueError(
                     "CRITICAL: GITHUB_WEBHOOK_SECRET must be set to a strong secret (>=16 chars) in production."
