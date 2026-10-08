@@ -49,10 +49,27 @@ class DeliveryStore:
         )
 
     async def init_db(self) -> None:
-        """Create tables and indexes if they do not exist."""
+        """Create tables and indexes if they do not exist, and migrate new columns if needed."""
         async with self._db_lock:
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+            for alter_sql in (
+                "ALTER TABLE deliveries ADD COLUMN payload TEXT",
+                "ALTER TABLE deliveries ADD COLUMN payload_hash VARCHAR",
+                "ALTER TABLE deliveries ADD COLUMN destinations TEXT",
+                "ALTER TABLE deliveries ADD COLUMN worker_id VARCHAR",
+                "ALTER TABLE deliveries ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE deliveries ADD COLUMN locked_until DATETIME",
+                "ALTER TABLE deliveries ADD COLUMN next_run_at DATETIME",
+                "ALTER TABLE delivery_attempts ADD COLUMN trigger_type VARCHAR NOT NULL DEFAULT 'initial'",
+            ):
+                try:
+                    async with self.engine.begin() as conn:
+                        await conn.execute(text(alter_sql))
+                except Exception:
+                    pass
+
+
 
     async def close(self) -> None:
         """Dispose the engine connection pool."""

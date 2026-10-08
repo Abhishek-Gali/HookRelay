@@ -1,10 +1,15 @@
 # HookRelay: Hardened Webhook Delivery Infrastructure & Event Gateway
 
+<p align="center">
+  <img src="docs/assets/social-preview.png" alt="HookRelay — Hardened Webhook Ingestion & Multi-Destination Delivery Gateway" width="100%" />
+</p>
+
 [![CI & DevSecOps](https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhishek-Gali/HookRelay/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.135+-009688.svg)](https://fastapi.tiangolo.com)
 [![Tests: 64 Passed](https://img.shields.io/badge/tests-64%20passed-success.svg)](https://github.com/Abhishek-Gali/HookRelay)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 
 > **"A secure API that receives events from applications and reliably delivers them to communication platforms and other HTTP services."**
 >
